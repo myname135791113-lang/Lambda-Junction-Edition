@@ -23,7 +23,7 @@ from .classifier import TapClassifier
 from .density import estimate_density
 from .features import extract_features
 from .materials import DEFAULT_DENSITY, DEFAULT_FRICTION, MATERIALS
-from .report import badge, bars, line_chart, page
+from .report import badge, bars, line_chart, page, write_assets
 from .robot_sim import (CALIBRATION_OBJECTS, SCENARIOS, TAP_FS, TAP_PRE, GraspResult, SceneObject,
                         grasp_object, grasp_scene_xml, plan_grip_force, tap_object)
 from .twin import build_properties, write_twin
@@ -81,7 +81,7 @@ def grasp_gif(default: GraspResult, glove: GraspResult, obj: SceneObject, path: 
             if i >= n * 0.8:
                 _label(im, res.outcome.upper(), (im.width - 110, im.height - 32), size=16, bg=STATUS_RGB[res.outcome])
             panels.append(im)
-        canvas = Image.new("RGB", (panels[0].width * 2 + 6, panels[0].height), (250, 250, 248))
+        canvas = Image.new("RGB", (panels[0].width * 2 + 6, panels[0].height), (255, 250, 243))
         canvas.paste(panels[0], (0, 0))
         canvas.paste(panels[1], (panels[0].width + 6, 0))
         out.append(canvas.convert("P", palette=Image.Palette.ADAPTIVE, colors=160))
@@ -105,6 +105,7 @@ def run(out: Path, taps: int, seed: int, render: bool = True, part: str = "all",
     bodies.append("""<footer>Everything here is simulated: MuJoCo contact and grasp physics, a simplified acoustic
 model of the ring, and the glove's published sensor limits. The hand follows the Rokoko Device SDK skeleton and
 sensor layout, with size-M bone lengths. Accuracy on real objects has to be measured with the real glove.</footer>""")
+    write_assets(out)
     report = out / "index.html"
     report.write_text(page("Glove Test Report", "".join(bodies)), encoding="utf-8")
     result["report"] = report
