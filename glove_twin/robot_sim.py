@@ -70,8 +70,8 @@ def tap_scene_xml(obj: SceneObject) -> str:
   <visual><global offwidth="1280" offheight="960"/><quality shadowsize="2048"/></visual>
   <default>{hand_defaults()}</default>
   <asset>
-    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.86 0.89 0.93" rgb2="0.98 0.98 0.97" width="256" height="256"/>
-    <texture name="grid" type="2d" builtin="checker" rgb1="0.93 0.93 0.91" rgb2="0.86 0.86 0.84" width="512" height="512"/>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.90 0.86 0.81" rgb2="1.0 0.98 0.95" width="256" height="256"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.96 0.93 0.89" rgb2="0.89 0.85 0.80" width="512" height="512"/>
     <material name="grid" texture="grid" texrepeat="8 8"/>
   </asset>
   <worldbody>
@@ -208,8 +208,8 @@ def grasp_scene_xml(obj: SceneObject) -> str:
   <option timestep="0.002" cone="elliptic" impratio="10"/>
   <visual><global offwidth="1280" offheight="960"/><quality shadowsize="2048"/></visual>
   <asset>
-    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.86 0.89 0.93" rgb2="0.98 0.98 0.97" width="256" height="256"/>
-    <texture name="grid" type="2d" builtin="checker" rgb1="0.93 0.93 0.91" rgb2="0.86 0.86 0.84" width="512" height="512"/>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.90 0.86 0.81" rgb2="1.0 0.98 0.95" width="256" height="256"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.96 0.93 0.89" rgb2="0.89 0.85 0.80" width="512" height="512"/>
     <material name="grid" texture="grid" texrepeat="8 8"/>
   </asset>
   <worldbody>
