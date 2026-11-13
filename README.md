@@ -201,6 +201,7 @@ Use `--simulate MATERIAL` instead of `--port` to try any command without hardwar
 | `glove_twin/hand.py` | MuJoCo Rokoko-glove hand (SDK skeleton + sensor layout) |
 | `glove_twin/robot_sim.py` | Hand tap simulation and robot gripper A/B grasp |
 | `glove_twin/visual.py`, `visual_mapping.py`, `report.py` | Visual test runner and HTML report |
+| `glove_twin/assets/fonts/` | Self-hosted report fonts (Schibsted Grotesk, IBM Plex Mono; SIL OFL 1.1, licences alongside) |
 | `glove_twin/objects.py` | Sourced catalog of the model objects (ground truth) |
 | `glove_twin/shape_fit.py` | Gloves-only joint fit of box / cylinder / sphere, BIC model choice |
 | `glove_twin/touch.py` | Glove frames (joint angles + FSR pads) to contact points and normals |

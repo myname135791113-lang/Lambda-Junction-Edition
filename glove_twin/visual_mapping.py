@@ -115,7 +115,7 @@ def mapping_body(run: dict, trials: int) -> str:
              for r in res if r["map"].shape.best == r["obj"].shape and not r["map"].shape.ambiguous]
     off = run["offset"]
     b = [f"""
-<h1>Lambda: Junction Edition, glove test report</h1>
+<h1>Lambda: Junction Edition, <span>glove test report</span></h1>
 <p class="lede">With the Rokoko glove on, a person maps an object <b>by touch alone</b>: its shape (box, cylinder
 or sphere), its size and its physical properties. The result goes to a robot hand as an <b>object card</b>, so it
 knows how to grab that kind of object. Everything below is simulated, using the published specs of the

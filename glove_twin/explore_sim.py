@@ -62,7 +62,7 @@ def explore_scene_xml(obj: RefObject, scale: float = 1.0) -> str:
   <visual><global offwidth="1280" offheight="960"/><quality shadowsize="2048"/></visual>
   <default>{hand_defaults()}</default>
   <asset>
-    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.86 0.89 0.93" rgb2="0.98 0.98 0.97" width="256" height="256"/>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.90 0.86 0.81" rgb2="1.0 0.98 0.95" width="256" height="256"/>
     {asset}
   </asset>
   <worldbody>
