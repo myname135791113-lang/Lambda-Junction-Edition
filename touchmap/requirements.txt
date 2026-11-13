@@ -1,0 +1,5 @@
+numpy>=1.26
+scipy>=1.11
+rerun-sdk>=0.43   # live 3D view (optional with --no-view)
+pyserial>=3.5     # only for --serial button
+lz4               # only if Rokoko Studio sends LZ4-compressed packets
