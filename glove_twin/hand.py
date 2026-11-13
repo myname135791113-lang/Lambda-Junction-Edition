@@ -33,7 +33,8 @@ FINGERS = {
     "ring":   (-0.014, 0.061, 0.044, 0.027, 0.021, 0.0082),
     "little": (-0.032, 0.055, 0.035, 0.019, 0.018, 0.0072),
 }
-THUMB = {"base": (0.018, 0.024, -0.010), "euler": (0.5, 0.0, 0.75), "lengths": (0.045, 0.032, 0.027),
+THUMB = {"base": (0.018, 0.024, -0.010), "euler": (-1.2, -0.6, 1.1),  # tuned for a ~16 cm opposing pinch span
+         "lengths": (0.045, 0.032, 0.027),
          "radius": 0.0098}
 
 GLOVE_RGBA = "0.16 0.16 0.18 1"
@@ -92,7 +93,7 @@ class _Builder:
             angle = self.pose.get(jname, 0.0)
             if self.active is None or jname in self.active:
                 k = self.stiffness.get(jname, 0.3)
-                xml.append(f'<joint name="{jname}" type="hinge" axis="{axis}" range="{limit[0]} {limit[1]}" '
+                xml.append(f'<joint name="{jname}" type="hinge" axis="{axis}" limited="true" range="{limit[0]} {limit[1]}" '
                            f'springref="{angle}" stiffness="{k}" damping="{k * 0.02:.5f}"/>')
             else:
                 q = _qmul(q, _qaxis(AXES[axis], angle))
@@ -104,11 +105,19 @@ def _capsule(length: float, radius: float) -> str:
     return f'<geom class="glove" type="capsule" fromto="0 0 0 {length} 0 0" size="{radius}"/>'
 
 
-def _finger(b: _Builder, name: str, tap_pad: bool) -> str:
-    y, l_meta, l_prox, l_int, l_dist, r = FINGERS[name]
+def _pad(name: str, x: float, r_seg: float, size_frac: float = 0.6) -> str:
+    """Pressure pad (cheap FSR) on the palmar side (-z) of a segment, as a small sphere."""
+    size = r_seg * size_frac
+    return f'<geom name="{name}" class="pad" type="sphere" size="{size:.5f}" pos="{x:.5f} 0 {-r_seg * 0.55:.5f}"/>'
+
+
+def _finger(b: _Builder, name: str, tap_pad: bool, touch_pads: bool, s: float) -> str:
+    y, l_meta, l_prox, l_int, l_dist, r = (v * s for v in FINGERS[name])
     pad = (f'<geom name="tap_pad" type="sphere" size="0.0055" pos="-0.002 0 -0.003" '
            f'rgba="{PIEZO_RGBA}" contype="1" conaffinity="1" condim="1" mass="0.002"/>'
            f'<site name="fsr_piezo" pos="-0.002 0 -0.003" size="0.004"/>') if tap_pad else ""
+    inter_pad = _pad(f"{name}_intermediate_pad", l_int * 0.55, r * 0.94) if touch_pads else ""
+    dist_pad = _pad(f"{name}_distal_pad", l_dist * 0.78, r * 0.88) if touch_pads else ""  # fingertip pulp
     prox, prox_j = b.body(f"{name}_proximal", f"{l_meta} 0 0",
                           [(f"{name}_mcp_flex", "0 1 0", LIMITS["mcp_flex"]),
                            (f"{name}_mcp_abd", "0 0 1", LIMITS["mcp_abd"])])
@@ -120,9 +129,11 @@ def _finger(b: _Builder, name: str, tap_pad: bool) -> str:
           {_capsule(l_prox, r)}
           {inter}{inter_j}
             {_capsule(l_int, r * 0.94)}
+            {inter_pad}
             <site name="{name}_finger_sensor" type="box" pos="{l_int / 2} 0 {r}" size="0.007 0.0055 0.0022" rgba="{ROKOKO_SENSOR_RGBA}"/>
             {dist}{dist_j}
               {_capsule(l_dist, r * 0.88)}
+              {dist_pad}
               <body name="{name}_tip" pos="{l_dist + r * 0.6} 0 0">
                 <site name="{name}_tip"/>
                 {pad}
@@ -133,59 +144,121 @@ def _finger(b: _Builder, name: str, tap_pad: bool) -> str:
       </body>"""
 
 
-def _thumb(b: _Builder) -> str:
-    x, y, z = THUMB["base"]
-    l_meta, l_prox, l_dist = THUMB["lengths"]
-    r = THUMB["radius"]
+def _thumb(b: _Builder, touch_pads: bool, s: float) -> str:
+    x, y, z = (v * s for v in THUMB["base"])
+    l_meta, l_prox, l_dist = (v * s for v in THUMB["lengths"])
+    r = THUMB["radius"] * s
     meta, meta_j = b.body("thumb_metacarpal", f"{x} {y} {z}",
                           [("thumb_cmc_flex", "0 1 0", LIMITS["thumb_cmc_flex"]),
                            ("thumb_cmc_abd", "0 0 1", LIMITS["thumb_cmc_abd"])],
                           base=_qeuler(*THUMB["euler"]))
     prox, prox_j = b.body("thumb_proximal", f"{l_meta} 0 0", [("thumb_mcp", "0 1 0", LIMITS["thumb_mcp"])])
     dist, dist_j = b.body("thumb_distal", f"{l_prox} 0 0", [("thumb_ip", "0 1 0", LIMITS["thumb_ip"])])
+    prox_pad = _pad("thumb_proximal_pad", l_prox * 0.55, r * 0.92) if touch_pads else ""
+    dist_pad = _pad("thumb_distal_pad", l_dist * 0.78, r * 0.85) if touch_pads else ""  # fingertip pulp
     return f"""
       {meta}{meta_j}
         {_capsule(l_meta, r)}
         {prox}{prox_j}
           {_capsule(l_prox, r * 0.92)}
+          {prox_pad}
           <site name="thumb_finger_sensor" type="box" pos="{l_prox / 2} 0 {r}" size="0.007 0.0055 0.0022" rgba="{ROKOKO_SENSOR_RGBA}"/>
           {dist}{dist_j}
             {_capsule(l_dist, r * 0.85)}
+            {dist_pad}
             <body name="thumb_tip" pos="{l_dist + r * 0.6} 0 0"><site name="thumb_tip"/></body>
           </body>
         </body>
       </body>"""
 
 
-def hand_defaults() -> str:
-    """MJCF <default> classes the hand needs. Put inside <default>."""
-    return f'<default class="glove"><geom contype="0" conaffinity="0" rgba="{GLOVE_RGBA}" density="1100"/></default>'
+def hand_defaults(collide: bool = False) -> str:
+    """MJCF <default> classes the hand needs. Put inside <default>.
+
+    collide=False: the hand is visual only (tap scene, kinematic exploration).
+    collide=True:  segments and pads collide with objects whose conaffinity includes bit 2
+                   (contype 2 / conaffinity 0, so fingers never collide with each other).
+    """
+    c = ('contype="2" conaffinity="0" condim="4" friction="1.0 0.02 0.001"' if collide
+         else 'contype="0" conaffinity="0"')
+    return (f'<default class="glove"><geom {c} rgba="{GLOVE_RGBA}" density="1100"/></default>'
+            f'<default class="pad"><geom {c} rgba="{PIEZO_RGBA}" density="1100"/></default>')
 
 
 def hand_body(pose: dict | None = None, *, active_joints: set[str] | None = None,
-              stiffness: dict[str, float] | None = None, tap_pad: bool = True) -> str:
-    """The forearm + hand as one mocap-driven body tree. Insert inside <worldbody>.
+              stiffness: dict[str, float] | None = None, tap_pad: bool = True,
+              touch_pads: bool = False, scale: float = 1.0, mocap: bool = True,
+              root_joints: str = "", root_pos: str = "0 0 0", root_quat: str = "1 0 0 0") -> str:
+    """The forearm + hand as one body tree. Insert inside <worldbody>.
 
     active_joints: joints that stay movable; the rest are frozen at `pose` (None = all movable).
-    For tapping only the index MCP swings. A real tap is made with the finger held stiff, so the
-    contact time depends on the object, not on the finger wobbling.
+                   For tapping only the index MCP swings: a real tap is made with the finger held
+                   stiff, so the contact time depends on the object, not on the finger wobbling.
+    touch_pads:    FSR pads on the intermediate + distal segments, thumb proximal + distal, palm.
+    scale:         bone-length scale (the wearer's real hand vs. the size-M defaults).
+    mocap=False + root_joints: mount the hand on joints instead (robot hand on slides).
     """
     b = _Builder(TAP_POSE if pose is None else pose, active_joints, stiffness or {})
-    fingers = "".join(_finger(b, f, tap_pad and f == "index") for f in FINGERS)
+    s = scale
+    fingers = "".join(_finger(b, f, tap_pad and f == "index", touch_pads, s) for f in FINGERS)
+    palm_pads = "".join(
+        f'<geom name="palm_pad_{i}" class="pad" type="sphere" size="{0.008 * s:.5f}" '
+        f'pos="{px * s:.5f} {py * s:.5f} {-0.0085 * s:.5f}"/>'
+        for i, (px, py) in enumerate(PALM_PADS_XY)
+    ) if touch_pads else ""
+    root = 'mocap="true"' if mocap else ""
     return f"""
-    <body name="forearm" mocap="true">
-      <geom class="glove" type="capsule" fromto="-0.20 0 0 -0.02 0 0" size="0.026"/>
-      <site name="arm_sensor" type="box" pos="-0.05 0 0.027" size="0.012 0.01 0.004" rgba="{ROKOKO_SENSOR_RGBA}"/>
-      <site name="mic" type="cylinder" pos="-0.035 0.0 0.030" size="0.006 0.003" rgba="{MIC_RGBA}"/>
+    <body name="forearm" pos="{root_pos}" quat="{root_quat}" {root}>
+      {root_joints}
+      <geom class="glove" type="capsule" fromto="{-0.20 * s} 0 0 {-0.02 * s} 0 0" size="{0.026 * s}"/>
+      <site name="arm_sensor" type="box" pos="{-0.05 * s} 0 {0.027 * s}" size="0.012 0.01 0.004" rgba="{ROKOKO_SENSOR_RGBA}"/>
+      <site name="mic" type="cylinder" pos="{-0.035 * s} 0.0 {0.030 * s}" size="0.006 0.003" rgba="{MIC_RGBA}"/>
       <body name="wrist" pos="0 0 0">
-        <geom class="glove" type="box" pos="0.036 -0.003 0" size="0.040 0.041 0.0125"/>
-        <geom class="glove" type="capsule" fromto="0.0 -0.03 0 0.0 0.03 0" size="0.016"/>
-        <site name="palm" pos="0.033 0.006 0"/>
-        <site name="hub" type="cylinder" pos="0.030 0.0 0.0135" size="0.014 0.003" rgba="{ROKOKO_SENSOR_RGBA}"/>
-        {_thumb(b)}
+        <geom class="glove" type="box" pos="{0.036 * s} {-0.003 * s} 0" size="{0.040 * s} {0.041 * s} {0.0125 * s}"/>
+        <geom class="glove" type="capsule" fromto="0.0 {-0.03 * s} 0 0.0 {0.03 * s} 0" size="{0.016 * s}"/>
+        {palm_pads}
+        <site name="palm" pos="{0.033 * s} {0.006 * s} 0"/>
+        <site name="hub" type="cylinder" pos="{0.030 * s} 0.0 {0.0135 * s}" size="0.014 0.003" rgba="{ROKOKO_SENSOR_RGBA}"/>
+        {_thumb(b, touch_pads, s)}
         {fingers}
       </body>
     </body>"""
+
+
+PALM_PADS_XY = [(0.020, 0.018), (0.020, -0.022), (0.056, 0.018), (0.056, -0.022)]
+ALL_JOINTS = [f"{f}_{j}" for f in FINGERS for j in ("mcp_flex", "mcp_abd", "pip", "dip")] + [
+    "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip"]
+FLEX_CHAINS = {f: [f"{f}_mcp_flex", f"{f}_pip", f"{f}_dip"] for f in FINGERS}
+FLEX_CHAINS["thumb"] = ["thumb_cmc_flex", "thumb_mcp", "thumb_ip"]
+PAD_NAMES = [f"{f}_{seg}_pad" for f in FINGERS for seg in ("intermediate", "distal")] + [
+    "thumb_proximal_pad", "thumb_distal_pad"] + [f"palm_pad_{i}" for i in range(4)]
+
+# Preshapes (radians) applied before the fingers close.
+PRESHAPES = {
+    "open": {"thumb_cmc_abd": 0.75, "thumb_cmc_flex": 0.10},
+    "sphere": {"index_mcp_abd": 0.18, "middle_mcp_abd": 0.04, "ring_mcp_abd": -0.10,
+               "little_mcp_abd": -0.22, "thumb_cmc_abd": 0.80, "thumb_cmc_flex": 0.10},
+    "pinch": {"thumb_cmc_abd": 0.90, "thumb_cmc_flex": -0.30, "thumb_mcp": 0.0, "thumb_ip": 0.2,
+              "index_mcp_flex": 0.30, "index_pip": 0.30, "index_dip": 0.20,
+              **{f"{f}_{j}": q for f in ("middle", "ring", "little")
+                 for j, q in (("mcp_flex", 1.45), ("pip", 1.6), ("dip", 1.0))}},
+}
+
+
+def hand_actuators(joints: list[str], kp: float = 2.0, forcerange: dict[str, float] | None = None) -> str:
+    """Position actuators (one per joint) with per-joint torque limits. Put inside <actuator>."""
+    out = []
+    for j in joints:
+        f = (forcerange or {}).get(j, 0.6)
+        out.append(f'<position name="act_{j}" joint="{j}" kp="{kp}" forcerange="{-f} {f}" '
+                   f'forcelimited="true" ctrlrange="-0.3 1.8" ctrllimited="true"/>')
+    return "\n".join(out)
+
+
+def hand_couplings() -> str:
+    """DIP follows PIP (DIP ~ 0.7 x PIP), as in human fingers and tendon-driven robot hands.
+    Put inside <equality>."""
+    return "\n".join(f'<joint joint1="{f}_dip" joint2="{f}_pip" polycoef="0 0.7 0 0 0"/>' for f in FINGERS)
 
 
 # Bodies corresponding to the 26 OpenXR hand joints (+ forearm). Palm is a site, as in the SDK

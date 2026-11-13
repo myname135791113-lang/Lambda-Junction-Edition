@@ -5,6 +5,8 @@
   python -m glove_twin calibrate --material wood --taps 10 --port COM5
   python -m glove_twin scan --object mug --taps 5 --port COM5 --mass-g 350 --dims 0.09 0.09 0.10
   (replace --port COM5 with --simulate to run without hardware)
+  python -m glove_twin map --object redbull --simulate --robot
+  python -m glove_twin map --frames session.json --mass-g 270 --material filled_can
 """
 from __future__ import annotations
 
@@ -135,6 +137,59 @@ def cmd_demo(args) -> None:
     cmd_scan(scan)
 
 
+def cmd_map(args) -> None:
+    """Touch mapping: shape + size from touch, then the object card (and optionally a robot grasp)."""
+    from .mapping import calibrate, make_card, map_object
+    from .object_card import build_card, validate_card, write_card
+    from .objects import OBJECTS
+    from .shape_fit import fit_shape
+    from .touch import load_frames, reconstruct
+
+    offset = {"enclosure": args.offset_enclosure_mm / 1000, "caliper": args.offset_caliper_mm / 1000}
+    if args.frames:                                       # recorded glove data
+        if args.mass_g is None or args.material is None:
+            raise SystemExit("With --frames, give --mass-g (scale or lift test) and --material")
+        grasps = reconstruct(load_frames(args.frames), pad_offset=offset)
+        shape = fit_shape(grasps)
+        card = build_card(Path(args.frames).stem, Path(args.frames).stem, shape, mass_kg=args.mass_g / 1000,
+                          mass_source="entered by user", material_probs={args.material: 1.0},
+                          n_contacts=sum(len(g.points) for g in grasps), n_grasps=len(grasps))
+        truth, obj = None, None
+    else:
+        if not args.simulate or not args.object:
+            raise SystemExit("Give --object and --simulate, or --frames FILE")
+        obj = OBJECTS[args.object]
+        if args.offset_enclosure_mm == 0 and args.offset_caliper_mm == 0:
+            print("Calibrating pad offsets on the Red Bull can (simulated) ...")
+            offset = calibrate(np.random.default_rng(1000))
+        rng = np.random.default_rng(args.seed)
+        m = map_object(obj, rng, pad_offset=offset, max_follow_ups=args.follow_ups)
+        shape, truth = m.shape, obj.dims_vector()
+        card = make_card(obj, m, rng)
+        print(f"{len(m.grasps)} grasps, {sum(len(g.points) for g in m.grasps)} contacts, "
+              f"{m.follow_ups} follow-up round(s)")
+    problems = validate_card(card)
+    if problems:
+        raise SystemExit(f"Card invalid: {problems}")
+    print(f"\nShape:  {shape.best}   (" + ", ".join(f"{k} {v:.0%}" for k, v in shape.weights.items()) + ")")
+    for i, (k, v) in enumerate(shape.dims.items()):
+        sig = shape.sigma[k]
+        line = f"  {k:<7} {v * 1000:6.1f} mm " + (f"+- {sig * 1000:.1f}" if np.isfinite(sig) else "(not measured)")
+        if truth is not None and shape.best == obj.shape:
+            line += f"   true {truth[i] * 1000:6.1f}   error {(v - truth[i]) * 1000:+5.1f}"
+        print(line)
+    for r in shape.reasons:
+        print(f"  ! {r}")
+    g = card["grasp"]
+    print(f"Card:   {card['mass_kg'] * 1000:.0f} g, {card['material']['best']}, friction {card['friction']:.2f}, "
+          f"max squeeze {card['max_safe_grip_n']:.0f} N")
+    print(f"Grasp:  {g['type']} at {g['grip_force_n']:.1f} N  ->  {write_card(card, args.out)}")
+    if args.robot and obj is not None:
+        from .robot_hand import robot_grasp
+        r = robot_grasp(obj, g, g["grip_force_n"])
+        print(f"Robot:  {r.outcome} (lift {r.lift_m * 100:.1f} cm, peak squeeze {r.peak_squeeze_n:.1f} N)")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="glove_twin", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -173,6 +228,21 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--out", type=Path, default=Path("twins"))
     common(sp, simulate_takes_material=True)
     sp.set_defaults(func=cmd_scan)
+
+    from .objects import OBJECTS as _OBJECTS
+    sp = sub.add_parser("map", help="map an object's shape by touch and write its object card")
+    sp.add_argument("--object", choices=list(_OBJECTS), help="model object (simulation)")
+    sp.add_argument("--simulate", action="store_true", help="simulate the glove session")
+    sp.add_argument("--frames", help="recorded glove frames (JSON, see touch.save_frames)")
+    sp.add_argument("--mass-g", type=float, help="mass from a scale or the lift test (with --frames)")
+    sp.add_argument("--material", choices=list(MATERIALS), help="material from the tap test (with --frames)")
+    sp.add_argument("--offset-enclosure-mm", type=float, default=0.0, help="pad offset from calibration")
+    sp.add_argument("--offset-caliper-mm", type=float, default=0.0, help="pinch offset from calibration")
+    sp.add_argument("--follow-ups", type=int, default=2, help="extra touch rounds while ambiguous")
+    sp.add_argument("--seed", type=int, default=7)
+    sp.add_argument("--robot", action="store_true", help="also run the robot-hand grasp (simulation)")
+    sp.add_argument("--out", type=Path, default=Path("cards"))
+    sp.set_defaults(func=cmd_map)
 
     sp = sub.add_parser("demo", help="simulated end-to-end run, no hardware needed")
     sp.add_argument("--out", type=Path, default=Path("twins"))

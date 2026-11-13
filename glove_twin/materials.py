@@ -35,7 +35,15 @@ MATERIALS: dict[str, Material] = {m.name: m for m in [
     Material("wood",          650, ( 400,  900), 0.50,  80, 0.50, 0.015,  800, 0.40),
     Material("cardboard",     300, ( 100,  700), 0.50,  10, 1.50, 0.080,  350, 0.20),
     Material("foam",           40, (  15,  100), 0.80,   5, 6.00, 0.300,  150, 0.05),
+    # Full, sealed drink containers. The density here is the BULK density of the full container
+    # (mass / outer volume), not the wall material: a full can is ~0.92 g/cm^3, a full carton ~0.84.
+    # Tap responses are SIMULATION ASSUMPTIONS (liquid damps the thin wall); replace them with
+    # calibration taps on the real objects.
+    Material("filled_can",    920, ( 850, 1000), 0.40, 120, 0.45, 0.060,  700, 0.35),
+    Material("filled_carton", 840, ( 750,  950), 0.50,  20, 1.10, 0.120,  320, 0.15),
 ]}
+
+CONTAINER_MATERIALS = {"filled_can", "filled_carton"}  # density = bulk prior, never a wall material
 
 # Values MuJoCo uses when nothing is known (the "default physics" twin, as in RialTo).
 DEFAULT_DENSITY = 1000.0

@@ -1,7 +1,11 @@
-"""Visual end-to-end test: Rokoko-glove hand taps -> digital twin -> robot grasp A/B.
+"""Visual end-to-end test report.
 
-  python -m glove_twin.visual                 # run, write reports/visual/index.html, open it
-  python -m glove_twin.visual --viewer        # also replay the grasps in the MuJoCo viewer
+  Part A: touch mapping (box / cylinder / sphere) -> object card -> multi-finger robot grasp
+  Part B: Rokoko-glove hand taps -> material -> digital twin -> parallel-gripper A/B
+
+  python -m glove_twin.visual                 # both parts, write reports/visual/index.html, open it
+  python -m glove_twin.visual --part mapping  # only part A (--trials N sets the accuracy trials)
+  python -m glove_twin.visual --viewer        # also replay the gripper grasps in the MuJoCo viewer
 
 Needs: mujoco, pillow (pip install -r requirements.txt).
 """
@@ -86,9 +90,29 @@ def grasp_gif(default: GraspResult, glove: GraspResult, obj: SceneObject, path: 
 
 # ---------------------------------------------------------------- the run
 
-def run(out: Path, taps: int, seed: int, render: bool = True) -> dict:
-    rng = np.random.default_rng(seed)
+def run(out: Path, taps: int, seed: int, render: bool = True, part: str = "all", trials: int = 5) -> dict:
+    from .visual_mapping import mapping_body, run_mapping
     out.mkdir(parents=True, exist_ok=True)
+    bodies, result = [], {}
+    if part in ("all", "mapping"):
+        mrun = run_mapping(out, seed, trials, render)
+        bodies.append(mapping_body(mrun, trials))
+        result["mapping"] = mrun
+    if part in ("all", "taps"):
+        tap = run_taps(out, taps, seed, render)
+        bodies.append(tap["body"])
+        result.update(tap)
+    bodies.append("""<footer>Everything here is simulated: MuJoCo contact and grasp physics, a simplified acoustic
+model of the ring, and the glove's published sensor limits. The hand follows the Rokoko Device SDK skeleton and
+sensor layout, with size-M bone lengths. Accuracy on real objects has to be measured with the real glove.</footer>""")
+    report = out / "index.html"
+    report.write_text(page("Glove Test Report", "".join(bodies)), encoding="utf-8")
+    result["report"] = report
+    return result
+
+
+def run_taps(out: Path, taps: int, seed: int, render: bool = True) -> dict:
+    rng = np.random.default_rng(seed)
     t0 = time.time()
 
     print("1/4  Calibrating: the Rokoko hand taps 8 reference blocks of known material ...")
@@ -129,10 +153,7 @@ def run(out: Path, taps: int, seed: int, render: bool = True) -> dict:
         print(f"     {obj.name:<14} A {s['plan_default']:5.1f} N -> {s['default'].outcome:<8} "
               f"B {s['plan_glove']:5.1f} N -> {s['glove'].outcome}")
 
-    print("4/4  Writing report ...")
-    report = out / "index.html"
-    report.write_text(build_report(scans, clf, taps, time.time() - t0, seed), encoding="utf-8")
-    return {"report": report, "scans": scans}
+    return {"body": build_report(scans, clf, taps, time.time() - t0, seed), "scans": scans}
 
 
 # ---------------------------------------------------------------- report
@@ -144,7 +165,7 @@ def build_report(scans: list[dict], clf: TapClassifier, taps: int, seconds: floa
     mat_ok = sum(next(iter(s["probs"])) == s["obj"].material for s in scans)
 
     b = [f"""
-<h1>Glove tap test: Rokoko hand to robot grasp</h1>
+<h2 class="part">Part B · Tap test: material from light taps, gripper A/B</h2>
 <p class="lede">A simulated Rokoko Smartglove hand taps each object lightly with its index finger. The fingertip
 FSR, piezo and wrist microphone identify the material, the twin gets density, friction and fragility, and
 a robot gripper then grasps the real object using either default physics (as in RialTo) or the glove twin.</p>
@@ -166,7 +187,7 @@ a robot gripper then grasps the real object using either default physics (as in 
                  f"<td class='num'>{s['plan_glove']:.1f} N</td><td>{badge(s['glove'].outcome)}</td></tr>")
     b.append("</tbody></table>")
 
-    b.append("""<h2>1 · The Rokoko hand taps</h2>
+    b.append("""<h3 style="margin-top:28px">B1 · The Rokoko hand taps</h3>
 <p class="lede">The Rokoko glove streams finger pose at 83.33 Hz, one frame every 12 ms. A tap lasts under a
 millisecond, so the glove's own frames miss it entirely. The fingertip FSR + piezo (16 kHz) catch the impact, and
 the wrist microphone hears the object ring after the finger has left.</p>""")
@@ -203,7 +224,7 @@ the wrist microphone hears the object ring after the finger has left.</p>""")
 <table><tbody>{feat_rows}</tbody></table></div>
 <div>{''.join(charts)}</div></div></section>""")
 
-    b.append("""<h2>2 · Robot grasp A/B</h2>
+    b.append("""<h3 style="margin-top:28px">B2 · Parallel-gripper grasp A/B</h3>
 <p class="lede">Same gripper, same real object. The grip force is planned from the twin:
 safety factor 1.5 × weight ÷ (2 × friction), capped at 80% of the safe force when the twin knows the
 object is fragile. A: default physics (density 1000, friction 1, no fragility). B: the glove twin.</p>""")
@@ -232,11 +253,7 @@ object is fragile. A: default physics (density 1000, friction 1, no fragility). 
 <details><summary>Twin files</summary><span class="pill">twins/{o.name}.properties.json</span>
 <span class="pill">twins/{o.name}.glove.xml</span><span class="pill">twins/{o.name}.default.xml</span></details></section>""")
 
-    b.append("""<footer>Everything here is simulated: MuJoCo contact and grasp physics, plus a simplified
-acoustic model of the ring. The hand follows the Rokoko Device SDK skeleton and sensor layout, with size-M bone
-lengths (the SDK sends exact ones at runtime). Results show the pipeline works end to end. Accuracy on real
-objects has to be measured with the real glove.</footer>""")
-    return page("Glove Tap Test", "".join(b))
+    return "".join(b)
 
 
 def replay_in_viewer(scans: list[dict]) -> None:
@@ -266,13 +283,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--taps", type=int, default=5)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--no-open", action="store_true", help="don't open the report in the browser")
-    ap.add_argument("--viewer", action="store_true", help="replay the grasps in the MuJoCo viewer")
+    ap.add_argument("--viewer", action="store_true", help="replay the gripper grasps in the MuJoCo viewer")
+    ap.add_argument("--part", choices=["all", "mapping", "taps"], default="all")
+    ap.add_argument("--trials", type=int, default=5, help="extra mapping sessions per object for the accuracy table")
     args = ap.parse_args(argv)
-    result = run(args.out, args.taps, args.seed)
+    result = run(args.out, args.taps, args.seed, part=args.part, trials=args.trials)
     print(f"\nReport: {result['report'].resolve()}")
     if not args.no_open:
         webbrowser.open(result["report"].resolve().as_uri())
-    if args.viewer:
+    if args.viewer and "scans" in result:
         replay_in_viewer(result["scans"])
 
 

@@ -130,6 +130,49 @@ def bars(probs: dict[str, float], top: int = 4) -> str:
     return '<div class="bars">' + "".join(rows) + "</div>"
 
 
+def ortho_views(points: np.ndarray, model: str, theta: np.ndarray, kinds: list[str]) -> str:
+    """Three orthographic views (front x-z, side y-z, top x-y) of the contacts in the fitted
+    object frame, with the fitted primitive's outline. Pure SVG."""
+    size, pad = 190, 16
+    if model == "sphere":
+        ext = np.full(3, theta[0])
+    elif model == "cylinder":
+        ext = np.array([theta[0], theta[0], theta[1] / 2])
+    else:
+        ext = np.asarray(theta) / 2
+    lim = max(float(np.max(ext)), float(np.max(np.abs(points)))) * 1.15
+    sc = (size / 2 - pad) / lim
+    views = [("front (x-z)", 0, 2), ("side (y-z)", 1, 2), ("top (x-y)", 0, 1)]
+    kind_slot = {"enclosure": 1, "top": 2, "caliper": 3}
+    out = ['<div class="ortho">']
+    for title, a, b in views:
+        cx = cy = size / 2
+        X = lambda v: cx + v * sc
+        Y = lambda v: cy - v * sc
+        el = [f'<svg viewBox="0 0 {size} {size}" role="img" aria-label="{html.escape(title)}">',
+              f'<line class="grid" x1="{pad}" x2="{size - pad}" y1="{cy}" y2="{cy}"/>',
+              f'<line class="grid" x1="{cx}" x2="{cx}" y1="{pad}" y2="{size - pad}"/>']
+        if model == "sphere" or (model == "cylinder" and (a, b) == (0, 1)):
+            el.append(f'<circle class="outline" cx="{cx}" cy="{cy}" r="{ext[0] * sc:.1f}"/>')
+        else:
+            w, h = ext[a] * sc, ext[b] * sc
+            el.append(f'<rect class="outline" x="{cx - w:.1f}" y="{cy - h:.1f}" width="{2 * w:.1f}" height="{2 * h:.1f}"/>')
+        order = np.argsort(points[:, 3 - a - b])                # draw far points first
+        for i in order:
+            p, k = points[i], kinds[i]
+            el.append(f'<circle class="pt" cx="{X(p[a]):.1f}" cy="{Y(p[b]):.1f}" r="3.6" '
+                      f'style="fill:var(--s{kind_slot.get(k, 1)})"><title>{k}: '
+                      f'{p[0] * 1000:.0f}, {p[1] * 1000:.0f}, {p[2] * 1000:.0f} mm</title></circle>')
+        el.append(f'<text class="tick" x="{pad}" y="{pad - 3}">{html.escape(title)}</text></svg>')
+        out.append("".join(el))
+    out.append("</div>")
+    legend = ('<div class="legend"><span><i class="dot-key" style="--c:var(--s1)"></i>enclosure</span>'
+              '<span><i class="dot-key" style="--c:var(--s2)"></i>top grasp</span>'
+              '<span><i class="dot-key" style="--c:var(--s3)"></i>caliper pinch</span>'
+              '<span><i class="key dashed" style="--c:var(--ink2)"></i>fitted shape</span></div>')
+    return legend + "".join(out)
+
+
 STATUS = {"lifted": ("good", "&#10003;", "Lifted safely"), "dropped": ("serious", "&#8595;", "Dropped"),
           "crushed": ("critical", "&#10005;", "Crushed")}
 
@@ -150,7 +193,7 @@ CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1180px;margin:0 auto;padding:28px 16px 60px}
-h1{font-size:28px;margin:0 0 4px;letter-spacing:-.01em}h2{font-size:20px;margin:44px 0 6px}h3{font-size:17px;margin:0}
+h1{font-size:28px;margin:0 0 4px;letter-spacing:-.01em}h2.part{font-size:22px;margin:48px 0 8px;padding-top:18px;border-top:2px solid var(--border)}h2{font-size:20px;margin:44px 0 6px}h3{font-size:17px;margin:0}
 .lede{color:var(--ink2);max-width:780px;margin:0 0 20px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:18px 0}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
@@ -191,6 +234,13 @@ td.num,th.num{text-align:right}
 details{margin-top:8px}summary{cursor:pointer;color:var(--ink2);font-size:13px}
 .theme{position:fixed;top:12px;right:12px;font:inherit;font-size:12px;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer}
 footer{color:var(--muted);font-size:13px;margin-top:40px}
+.ortho{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:4px 0 8px}
+.ortho svg{width:100%;height:auto;background:var(--page);border:1px solid var(--border);border-radius:8px}
+.outline{fill:none;stroke:var(--ink2);stroke-width:1.5;stroke-dasharray:5 4}
+.pt{stroke:var(--surface);stroke-width:1.5}
+.dot-key{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--c);margin-right:6px;vertical-align:middle}
+.note-box{border-left:3px solid var(--s1);padding:6px 12px;margin:10px 0;color:var(--ink2);font-size:13px;background:var(--surface)}
+code{font-size:12px;background:var(--page);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
 """
 
 JS = """

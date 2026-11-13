@@ -1,10 +1,95 @@
 # Lambda - Junction Edition
 
-**Glove tap sensing → material and density → MuJoCo digital twin.**
+**Map an object by touch with a Rokoko glove → object card → a robot hand grabs the same kind of object.**
+
+A person wearing the glove handles an object for 30–60 seconds. From touch alone the system works out
+its **shape** (box, cylinder or sphere) and **dimensions**, and from light taps, a lift and a slide its
+**material, mass and friction**. It writes an **object card** (JSON) that tells a robot hand how to
+grasp that kind of object, and how hard to squeeze.
+
+```bash
+pip install -r requirements.txt
+python -m glove_twin map --object redbull --simulate --robot   # one object, card + robot grasp
+python -m glove_twin.visual                                    # full visual report, opens in the browser
+python -m unittest discover -s tests -v                        # all tests (~5 min)
+```
+
+## Touch mapping: box, cylinder, sphere
+
+### Model objects (ground truth, with sources)
+
+| Object | Shape and size | Mass | Sources |
+|---|---|---|---|
+| Red Bull 250 ml can, full | cylinder, Ø 53 mm, H 133 mm | ≈ 270 g (estimate: 250 ml × 1.04 g/ml + ~10 g can; weigh it) | [Crown 250 ml slim](https://crowncork.com/beverage-packaging/products/beverage-cans/83oz-250ml-slim), [Ball design guide](https://printguides.ball.com/whats-available/Europe), [redbull.com](https://www.redbull.com/int-en/energydrink/red-bull-energy-drink) |
+| Valio PROfeel 250 ml carton, full | box, 47.8 × 47.5 × 140 mm, sloped "Edge" top | 265.8 g | [Prisma.fi listing](https://www.prisma.fi/tuotteet/111163612/valio-profeel-proteiinijuoma-salted-caramel-250-ml-uht-laktoositon-111163612), [Valio + Tetra Brik Aseptic Edge](https://www.packaginginsights.com/news/valio-revitalises-dairy-products-with-tetra-brik-aseptic-edge.html) |
+| Wooden sphere | sphere, r = 50 mm (V = 523.6 cm³) | ≈ 323 g: average of beech, paper birch and red pine | [USDA Wood Handbook, ch. 5](https://research.fs.usda.gov/treesearch/37427) (SG at 12 % moisture × 1.12) |
+
+All values live in `glove_twin/objects.py`. The mapping pipeline never reads them; they are only used
+to drive the simulator and score accuracy.
+
+### What the glove can and can't do (Rokoko Smartgloves II datasheet)
+
+- Finger positions **relative to the back of the hand**: 1.23 mm noise, **1.60 mm accuracy** (typical).
+  Output rate is **83.33 Hz**. ([datasheet](https://sdk.rokoko.com/datasheets/Smartgloves_II_Technical_Specifications_v1.0.0_External.pdf))
+- **No force sensing.** That's why cheap FSR pressure pads are added on the finger segments and palm.
+- **No Coil Pro**, so the glove doesn't know where the hand is in the room between grasps.
+
+### Gloves-only method
+
+1. **Routine:** two side enclosures, a top grasp (palm on the top), and thumb-to-index **caliper pinches**
+   across width, depth and height. This follows the exploratory procedures in
+   [Lederman & Klatzky 1987](https://web.eecs.umich.edu/~stellayu/teach/2023action/papers/1987klatzkyHandMovements.pdf).
+2. **Contacts:** each pressed pad gives a point (pad centre + pad radius along the palmar axis) and an
+   outward normal (the segment's dorsal axis), computed from joint angles only (`touch.py`).
+3. **Joint fit:** an object's size doesn't depend on where the hand is. So one Levenberg–Marquardt
+   fit estimates the shape parameters plus an unknown pose for every grasp (`shape_fit.py`, numpy
+   only). A pinch measures a width directly, because both contacts are in the same hand frame.
+4. **Shape choice:** BIC over box / cylinder / sphere. A margin below 6 counts as ambiguous.
+5. **Follow-up:** if the result is ambiguous or a dimension wasn't measured, the person is asked for one
+   more enclosure and new pinches (up to two rounds). Unmeasured dimensions are reported as
+   "not measured", never as a confident number.
+6. **Calibration:** one session on the can sets the pad offsets (`calibrate_pad_offset`). Enclosures
+   and pinches get separate offsets.
+
+### Simulated accuracy
+
+Ten sessions per object, each with a new hand size (±2 %), 1° joint noise and follow-ups enabled:
+**30/30 shapes correct**.
+
+- **Can:** radius within 5.6 mm, height within 10.3 mm.
+- **Carton:** width and depth within 5 mm. One session's height pinch couldn't be done at that hand
+  size, and was flagged rather than guessed.
+- **Sphere:** within 2 mm.
+
+The simulator's hand closes kinematically. The real glove has to confirm these numbers.
+
+### Object card → robot hand
+
+`object_card.py` writes, per object:
+- primitive, dimensions ± uncertainty, BIC weights
+- mass (from the lift test, never from the material), material (taps), friction (slide test)
+- max safe squeeze, grasp type (power wrap / box wrap / spherical) and grip force
+
+`robot_hand.py` grasps the real object with a multi-finger robot hand (Rokoko geometry, torque-driven
+fingers, force-regulated squeeze). With the card's force it lifts all three objects. At 0.3× it drops
+them, and above the safe limit it crushes the can and the carton.
+
+### Real hardware
+
+Record frames as JSON (`touch.save_frames`: joint angles from the Rokoko solver plus FSR readings per
+grasp), then:
+
+```bash
+python -m glove_twin map --frames session.json --mass-g 270 --material filled_can \
+    --offset-enclosure-mm 2.0 --offset-caliper-mm 2.8
+```
+
+A live Rokoko RGMP stream reader is the next step: TCP 12277 from `rkk-hand-solver`, per the SDK docs.
+
+## Tap sensing: material and density
 
 A person wearing the sensor glove taps an object lightly a few times. The glove works out what the
-object is made of, estimates its density, friction and fragility, and writes a MuJoCo twin. A robot
-can then plan on that twin and handle the same real object without the glove (real-to-sim-to-real).
+object is made of, estimates its density, friction and fragility, and writes a MuJoCo twin.
 
 ## What a tap can and can't tell you
 
@@ -35,7 +120,7 @@ finger-pad tap with no microphone gets only about half. **Tap with a fingernail 
 ```bash
 pip install -r requirements.txt
 python -m glove_twin demo                 # classify all materials and build a mug twin
-python -m unittest discover -s tests -v   # 23 tests, incl. the Rokoko hand and robot grasp sims
+python -m unittest discover -s tests -v   # all tests, incl. the Rokoko hand and robot sims
 ```
 
 ## Visual test: Rokoko hand → twin → robot grasp
@@ -115,7 +200,14 @@ Use `--simulate MATERIAL` instead of `--port` to try any command without hardwar
 | `glove_twin/simulate.py` | Synthetic taps / sensor models for testing without hardware |
 | `glove_twin/hand.py` | MuJoCo Rokoko-glove hand (SDK skeleton + sensor layout) |
 | `glove_twin/robot_sim.py` | Hand tap simulation and robot gripper A/B grasp |
-| `glove_twin/visual.py`, `report.py` | Visual test runner and HTML report |
+| `glove_twin/visual.py`, `visual_mapping.py`, `report.py` | Visual test runner and HTML report |
+| `glove_twin/objects.py` | Sourced catalog of the model objects (ground truth) |
+| `glove_twin/shape_fit.py` | Gloves-only joint fit of box / cylinder / sphere, BIC model choice |
+| `glove_twin/touch.py` | Glove frames (joint angles + FSR pads) to contact points and normals |
+| `glove_twin/explore_sim.py` | Simulated exploration routine (kinematic closing, pinches, follow-ups) |
+| `glove_twin/mapping.py` | Session orchestration, calibration, physical tests, card building |
+| `glove_twin/object_card.py` | Object card schema, grasp choice, grip force |
+| `glove_twin/robot_hand.py` | Multi-finger robot hand grasp from the card |
 | `glove_twin/materials.py` | Material priors (density, friction, fragility, tap response) |
 | `firmware/tap_glove/` | Microcontroller sketch: triggered capture, JSON over serial |
 
