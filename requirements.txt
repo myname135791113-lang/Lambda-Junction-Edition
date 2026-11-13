@@ -1,0 +1,4 @@
+numpy>=1.26
+pyserial>=3.5   # reading the real glove
+mujoco>=3.0     # twins, Rokoko hand and robot grasp simulation
+pillow>=10.1    # GIFs in the visual test report
