@@ -1,0 +1,92 @@
+{
+  "updated": "2026-11-14T13:17:10",
+  "n_grasps": 6,
+  "n_points": 30,
+  "label": "sphere",
+  "best_guess": "sphere",
+  "advice": "confident",
+  "probabilities": {
+    "box": 0.0006,
+    "cylinder": 0.0,
+    "sphere": 0.9994
+  },
+  "models": {
+    "box": {
+      "params": {
+        "center_mm": [
+          456.3,
+          20.5,
+          30.1
+        ],
+        "dims_mm": [
+          64.2,
+          55.7,
+          55.7
+        ],
+        "axes": [
+          [
+            0.808,
+            0.589,
+            0.0
+          ],
+          [
+            -0.589,
+            0.808,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "rms_mm": 3.69,
+      "free_params": 7,
+      "bic": 41.92
+    },
+    "cylinder": {
+      "params": {
+        "center_mm": [
+          461.4,
+          23.8,
+          45.4
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "radius_mm": 28.6,
+        "height_mm": 86.4
+      },
+      "rms_mm": 6.58,
+      "free_params": 5,
+      "bic": 49.59
+    },
+    "sphere": {
+      "params": {
+        "center_mm": [
+          459.8,
+          24.9,
+          35.0
+        ],
+        "radius_mm": 33.2
+      },
+      "rms_mm": 2.87,
+      "free_params": 4,
+      "bic": 26.98
+    }
+  },
+  "ground_truth": {
+    "shape": "sphere",
+    "dims_mm": [
+      33.4
+    ],
+    "center_mm": [
+      460.3,
+      24.6,
+      33.4
+    ]
+  }
+}

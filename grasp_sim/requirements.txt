@@ -1,0 +1,7 @@
+numpy
+scipy
+mujoco
+trimesh
+imageio
+imageio-ffmpeg
+pillow

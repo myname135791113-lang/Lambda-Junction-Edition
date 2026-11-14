@@ -1,0 +1,93 @@
+{
+  "updated": "2026-11-14T13:17:07",
+  "n_grasps": 6,
+  "n_points": 30,
+  "label": "cylinder",
+  "best_guess": "cylinder",
+  "advice": "confident",
+  "probabilities": {
+    "box": 0.0297,
+    "cylinder": 0.9703,
+    "sphere": 0.0
+  },
+  "models": {
+    "box": {
+      "params": {
+        "center_mm": [
+          415.7,
+          -122.4,
+          44.6
+        ],
+        "dims_mm": [
+          92.8,
+          52.0,
+          47.0
+        ],
+        "axes": [
+          [
+            0.902,
+            0.433,
+            0.0
+          ],
+          [
+            -0.433,
+            0.902,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "rms_mm": 3.44,
+      "free_params": 7,
+      "bic": 34.22
+    },
+    "cylinder": {
+      "params": {
+        "center_mm": [
+          416.6,
+          -122.9,
+          55.4
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "radius_mm": 28.0,
+        "height_mm": 114.4
+      },
+      "rms_mm": 3.12,
+      "free_params": 5,
+      "bic": 27.25
+    },
+    "sphere": {
+      "params": {
+        "center_mm": [
+          411.2,
+          -127.4,
+          35.6
+        ],
+        "radius_mm": 37.2
+      },
+      "rms_mm": 11.66,
+      "free_params": 4,
+      "bic": 64.78
+    }
+  },
+  "ground_truth": {
+    "shape": "cylinder",
+    "dims_mm": [
+      28.0,
+      93.2
+    ],
+    "center_mm": [
+      416.4,
+      -121.8,
+      46.6
+    ]
+  }
+}

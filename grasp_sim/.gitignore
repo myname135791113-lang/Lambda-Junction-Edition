@@ -1,0 +1,4 @@
+mujoco_menagerie/
+runs/
+__pycache__/
+*.pyc
