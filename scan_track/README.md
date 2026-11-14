@@ -61,8 +61,8 @@ Opens `http://127.0.0.1:8765` (100% offline 3D viewer—works even without inter
 | — | **Right-Drag / `Shift`+Drag / `WASD` / Arrows** | Move 3D visual map across the horizontal **X–Z table plane** |
 | — | **`Alt`+Drag / `Q` & `E`** | Adjust vertical view height |
 | — | **`F`** *(or **Follow** toggle)* | Center 3D camera onto active object / live gloved hands (handles any Coil Pro offset) |
-| — | **`O`** *(or **Object: Visible / See-Through**)* | Toggle predefined 3D object between solid and see-through (to inspect the 3D Convex Hull) |
-| — | **`H` / `V` / `0`** | Cycle Convex Hull visibility / toggle tactile points / reset camera view |
+| — | **`O` / `H` / `V`** *(or **Object / Hull / Points** buttons)* | Cycle predefined 3D **Object** (`O`) & **Convex Hull** (`H`) (`Visible` ↔ `See-Through`) and **Points** (`V`) (`Visible` ↔ `Hidden`) |
+| — | **`0`** | Reset camera view to workspace origin |
 
 ---
 

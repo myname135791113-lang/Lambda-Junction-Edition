@@ -142,6 +142,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     margin-bottom: 8px;
   }
   .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .btn-stack { display: flex; flex-direction: column; gap: 6px; margin-bottom: 9px; }
   button, select {
     background: #262c3a;
     color: var(--text);
@@ -212,7 +213,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="hud-bottom">
-      <b>Move X-Z Map:</b> Right-Drag / Shift+Drag / <b>[WASD / Arrows]</b> &nbsp;|&nbsp; <b>Orbit:</b> Left-Drag &nbsp;|&nbsp; <b>Height:</b> Alt+Drag / <b>[Q/E]</b> &nbsp;|&nbsp; <b>[F]</b> Center &nbsp;|&nbsp; <b>[O]</b> Object See-Through<br/>
+      <b>Move X-Z Map:</b> Right-Drag / Shift+Drag / <b>[WASD / Arrows]</b> &nbsp;|&nbsp; <b>Orbit:</b> Left-Drag &nbsp;|&nbsp; <b>Height:</b> Alt+Drag / <b>[Q/E]</b> &nbsp;|&nbsp; <b>[F]</b> Center &nbsp;|&nbsp; <b>[O/H/V]</b> Object / Hull / Points<br/>
       <b>Scan Keys:</b> <b>[T]</b> Trace &nbsp;<b>[G]</b> 5-Finger Snap &nbsp;<b>[C]</b> Caliper &nbsp;<b>[Space]</b> Lock/Place &nbsp;<b>[B]</b> Calibrate Table &nbsp;<b>[R]</b> Reset
     </div>
 
@@ -283,18 +284,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <div class="section" id="catalog-section">
       <h3>Known Catalog Match &rarr; Physics (90% Gate)</h3>
-      <div class="btn-grid" style="margin-bottom: 8px;">
-        <button id="btn-obj-solid" class="active-toggle" onclick="setObjectVisMode('solid')" title="Render predefined 3D object as solid [O]">Object: Visible</button>
-        <button id="btn-obj-see-through" onclick="setObjectVisMode('see_through')" title="Make predefined 3D object see-through so the Convex Hull is clearly visible [O]">Object: See-Through</button>
+      <div class="btn-stack">
+        <button id="btn-obj-vis" class="active-toggle" onclick="toggleObjectVisMode()" title="Cycle predefined 3D object between Visible and See-Through [O]">Object: Visible</button>
+        <button id="btn-hull-vis" onclick="toggleHullVisMode()" title="Cycle 3D Convex Hull between Visible and See-Through [H]">Hull: See-Through</button>
+        <button id="btn-pts-vis" class="active-toggle" onclick="togglePointsVis()" title="Cycle tactile points between Visible and Hidden [V]">Points: Visible</button>
       </div>
       <div id="confirmed-banner" class="confirmed-banner">✓ &gt;90% CONFIRMED — 3D STRUCTURE LOCKED</div>
       <div id="catalog-bars"></div>
       <div class="advice" id="match-advice">Waiting for tactile contacts...</div>
-    </div>
-
-    <div class="section">
-      <h3>MuJoCo Twin &amp; Unitree G1 Pick Plan</h3>
-      <div id="g1-summary" class="mono">Scan object, grab &amp; relocate on flat surface, then signal PLACED (✌️ or Space) to verify in MuJoCo and generate Unitree G1 command.</div>
     </div>
 
     <div class="section">
@@ -317,8 +314,8 @@ let activeDrag = null;        // null | 'orbit' | 'pan_xz' | 'pan_3d'
 let lastX = 0, lastY = 0;
 let followScene = false;
 let hasInitialRokokoFocus = false;
-let objectVisMode = 'solid';  // 'solid' | 'see_through'
-let hullMode = 'auto';        // 'auto' | 'show' | 'hide'
+let objectVisMode = 'solid';     // 'solid' ('Visible') | 'see_through' ('See-Through')
+let hullVisMode = 'see_through'; // 'solid' ('Visible') | 'see_through' ('See-Through')
 let showPoints = true;
 let lastFrameTime = performance.now();
 const keysDown = new Set();
@@ -392,7 +389,7 @@ window.addEventListener('keydown', e => {
   if (k === 'f') { centerOnActiveScene(); return; }
   if (k === '0' || k === 'home') { resetCameraView(); return; }
   if (k === 'o') { toggleObjectVisMode(); return; }
-  if (k === 'h') { cycleHullMode(); return; }
+  if (k === 'h') { toggleHullVisMode(); return; }
   if (k === 'v') { togglePointsVis(); return; }
   if (k === 't') act('trace_toggle');
   else if (k === 'g') act('snapshot');
@@ -416,21 +413,37 @@ function toggleFollow() {
 
 function setObjectVisMode(mode) {
   objectVisMode = mode === 'see_through' ? 'see_through' : 'solid';
-  const isSeeThrough = objectVisMode === 'see_through';
-  document.getElementById('btn-obj-solid').className = !isSeeThrough ? 'active-toggle' : '';
-  document.getElementById('btn-obj-see-through').className = isSeeThrough ? 'active-toggle' : '';
+  const isSolid = objectVisMode === 'solid';
+  const btn = document.getElementById('btn-obj-vis');
+  btn.textContent = isSolid ? 'Object: Visible' : 'Object: See-Through';
+  btn.className = isSolid ? 'active-toggle' : '';
 }
 
 function toggleObjectVisMode() {
   setObjectVisMode(objectVisMode === 'solid' ? 'see_through' : 'solid');
 }
 
-function cycleHullMode() {
-  hullMode = hullMode === 'auto' ? 'show' : (hullMode === 'show' ? 'hide' : 'auto');
+function setHullVisMode(mode) {
+  hullVisMode = mode === 'see_through' ? 'see_through' : 'solid';
+  const isSolid = hullVisMode === 'solid';
+  const btn = document.getElementById('btn-hull-vis');
+  btn.textContent = isSolid ? 'Hull: Visible' : 'Hull: See-Through';
+  btn.className = isSolid ? 'active-toggle' : '';
+}
+
+function toggleHullVisMode() {
+  setHullVisMode(hullVisMode === 'solid' ? 'see_through' : 'solid');
+}
+
+function setPointsVis(visible) {
+  showPoints = Boolean(visible);
+  const btn = document.getElementById('btn-pts-vis');
+  btn.textContent = showPoints ? 'Points: Visible' : 'Points: Hidden';
+  btn.className = showPoints ? 'active-toggle' : '';
 }
 
 function togglePointsVis() {
-  showPoints = !showPoints;
+  setPointsVis(!showPoints);
 }
 
 function resetCameraView() {
@@ -989,7 +1002,108 @@ function buildConfirmedStructure(tracked) {
   return { tris, ribs };
 }
 
-function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, zT) {
+function drawTriList(tris) {
+  for (const t of tris) {
+    ctx.beginPath();
+    ctx.moveTo(t.p0[0], t.p0[1]);
+    ctx.lineTo(t.p1[0], t.p1[1]);
+    ctx.lineTo(t.p2[0], t.p2[1]);
+    ctx.closePath();
+    ctx.fillStyle = t.fill;
+    ctx.fill();
+    if (t.strokeEdge) {
+      ctx.strokeStyle = t.edge;
+      ctx.lineWidth = t.lineW || 0.65;
+      ctx.stroke();
+    }
+  }
+}
+
+function buildHullDrawTris(hull, hullIsSeeThrough, objSolidActive, objIsSeeThrough, basis) {
+  if (!hull || !hull.vertices || !hull.faces) return { front: [], back: [], all: [] };
+  const V = hull.vertices;
+  const L1 = [0.40, -0.56, 0.72];
+  const L2 = [-0.62, 0.35, 0.42];
+  const baseRgb = [36, 198, 232];
+  const rimRgb = [184, 255, 59];
+  const front = [];
+  const back = [];
+
+  for (const [i0, i1, i2] of hull.faces) {
+    const v0 = V[i0], v1 = V[i1], v2 = V[i2];
+    const p0 = project3DWithBasis(v0, basis), p1 = project3DWithBasis(v1, basis), p2 = project3DWithBasis(v2, basis);
+    if (!p0 || !p1 || !p2) continue;
+
+    const ux = v1[0] - v0[0], uy = v1[1] - v0[1], uz = v1[2] - v0[2];
+    const vx = v2[0] - v0[0], vy = v2[1] - v0[1], vz = v2[2] - v0[2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const nn = Math.hypot(nx, ny, nz);
+    if (nn < 1e-10) continue;
+    nx /= nn; ny /= nn; nz /= nn;
+
+    const cx = (v0[0] + v1[0] + v2[0]) / 3;
+    const cy = (v0[1] + v1[1] + v2[1]) / 3;
+    const cz = (v0[2] + v1[2] + v2[2]) / 3;
+    let vxEye = basis.eye[0] - cx, vyEye = basis.eye[1] - cy, vzEye = basis.eye[2] - cz;
+    const vn = Math.hypot(vxEye, vyEye, vzEye) || 1;
+    vxEye /= vn; vyEye /= vn; vzEye /= vn;
+
+    const ndv = nx * vxEye + ny * vyEye + nz * vzEye;
+    const isFront = ndv > -0.02;
+    if (!hullIsSeeThrough && !isFront) continue; // Backface cull when Hull: Visible (solid)
+
+    const depth = (p0[2] + p1[2] + p2[2]) / 3;
+    if (!hullIsSeeThrough) {
+      const diff1 = Math.max(0, nx * L1[0] + ny * L1[1] + nz * L1[2]);
+      const diff2 = Math.max(0, nx * L2[0] + ny * L2[1] + nz * L2[2]);
+      const diff = 0.38 + 0.50 * diff1 + 0.20 * diff2;
+      let hx = L1[0] + vxEye, hy = L1[1] + vyEye, hz = L1[2] + vzEye;
+      const hn = Math.hypot(hx, hy, hz) || 1;
+      hx /= hn; hy /= hn; hz /= hn;
+      const spec = Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), 18) * 0.38;
+      const rim = Math.pow(1.0 - Math.max(0, ndv), 2.3) * 0.30;
+      const r = Math.min(255, Math.round(baseRgb[0] * diff + 255 * spec + rimRgb[0] * rim));
+      const g = Math.min(255, Math.round(baseRgb[1] * diff + 255 * spec + rimRgb[1] * rim));
+      const b = Math.min(255, Math.round(baseRgb[2] * diff + 255 * spec + rimRgb[2] * rim));
+      front.push({
+        p0, p1, p2, depth,
+        fill: `rgba(${r},${g},${b},0.88)`,
+        edge: 'rgba(184, 255, 59, 0.90)',
+        lineW: 1.2,
+        strokeEdge: true,
+      });
+    } else {
+      const shade = Math.max(0.25, Math.min(1.0, 0.55 + 0.45 * (0.4 * nx - 0.3 * ny + 0.85 * nz)));
+      const g = Math.round(165 * shade + 55);
+      const overSolidObj = objSolidActive && !objIsSeeThrough;
+      if (isFront) {
+        front.push({
+          p0, p1, p2, depth,
+          fill: `rgba(56, ${g}, 245, ${overSolidObj ? 0.11 : 0.25})`,
+          edge: overSolidObj ? 'rgba(184, 255, 59, 0.46)' : 'rgba(184, 255, 59, 0.65)',
+          lineW: overSolidObj ? 0.95 : 1.05,
+          strokeEdge: true,
+        });
+      } else {
+        back.push({
+          p0, p1, p2, depth,
+          fill: `rgba(56, ${g}, 245, ${overSolidObj ? 0.05 : 0.08})`,
+          edge: overSolidObj ? 'rgba(56, 217, 245, 0.14)' : 'rgba(56, 217, 245, 0.22)',
+          lineW: 0.75,
+          strokeEdge: true,
+        });
+      }
+    }
+  }
+
+  front.sort((a, b) => b.depth - a.depth);
+  back.sort((a, b) => b.depth - a.depth);
+  const all = [...back, ...front];
+  all.sort((a, b) => b.depth - a.depth);
+  return { front, back, all };
+}
+
+function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, zT, mergedSolidTris, overlayHullTris) {
   const p = tracked.pose;
   const [ex, ey, ez] = tracked.extents_m;
   const phase = p.phase || 'scanning';
@@ -1080,24 +1194,16 @@ function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, z
       depth: (p0[2] + p1[2] + p2[2]) / 3,
       fill: `rgba(${r},${g},${b},${fillAlpha})`,
       edge: `rgba(${r},${g},${b},${Math.min(1, fillAlpha + 0.06)})`,
+      lineW: 0.65,
+      strokeEdge: !isSeeThrough,
     });
   }
 
-  drawTris.sort((a, b) => b.depth - a.depth);
-  for (const t of drawTris) {
-    ctx.beginPath();
-    ctx.moveTo(t.p0[0], t.p0[1]);
-    ctx.lineTo(t.p1[0], t.p1[1]);
-    ctx.lineTo(t.p2[0], t.p2[1]);
-    ctx.closePath();
-    ctx.fillStyle = t.fill;
-    ctx.fill();
-    if (!isSeeThrough) {
-      ctx.strokeStyle = t.edge;
-      ctx.lineWidth = 0.65;
-      ctx.stroke();
-    }
+  if (mergedSolidTris && mergedSolidTris.length) {
+    drawTris.push(...mergedSolidTris);
   }
+  drawTris.sort((a, b) => b.depth - a.depth);
+  drawTriList(drawTris);
 
   // 3. Crisp Structural CAD Seams & Ribs (bright on front faces, subtle X-ray dashed on back)
   for (const rb of mesh.ribs) {
@@ -1112,6 +1218,10 @@ function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, z
     } else {
       drawLine3D(rb.a, rb.b, `rgba(${accentRgb[0]},${accentRgb[1]},${accentRgb[2]},${isSeeThrough ? 0.24 : 0.18})`, 1.0, [3, 4], basis);
     }
+  }
+
+  if (overlayHullTris && overlayHullTris.length) {
+    drawTriList(overlayHullTris);
   }
 
   // 4. High-Visibility Floating 3D Confirmation Badge above the Structure
@@ -1274,7 +1384,8 @@ function render(nowMs) {
   const conf = tracked ? (tracked.confidence || 0) : 0;
   const isConfirmed90 = Boolean(tracked && (tracked.confirmed_90 || conf > 0.90));
   const showSolidStructure = Boolean(tracked && (isConfirmed90 || state.phase === 'carrying' || state.phase === 'placed'));
-  const isSeeThrough = objectVisMode === 'see_through';
+  const objIsSeeThrough = objectVisMode === 'see_through';
+  const hullIsSeeThrough = hullVisMode === 'see_through';
 
   // Show Coil-to-Action offset tether on table when action happens >35 cm away from origin
   const focusPt = getActiveSceneFocus();
@@ -1282,66 +1393,51 @@ function render(nowMs) {
     drawLine3D([0, 0, zT + 0.0003], [focusPt[0], focusPt[1], zT + 0.0003], 'rgba(154,164,184,0.22)', 1.1, [5, 5], basis);
   }
 
-  // 2. Shaded Translucent 3D Convex Hull (stays crisp & bright when predefined object is See-Through!)
-  const renderHull = hullMode !== 'hide' && state.hull && state.hull.vertices && state.hull.faces;
-  if (renderHull) {
-    const dimHull = (!isSeeThrough && hullMode === 'auto' && showSolidStructure);
-    const fillAlpha = dimHull ? 0.045 : (isSeeThrough && showSolidStructure ? 0.34 : 0.26);
-    const strokeCol = dimHull
-      ? 'rgba(56, 217, 245, 0.11)'
-      : (isSeeThrough && showSolidStructure ? 'rgba(184, 255, 59, 0.72)' : 'rgba(184, 255, 59, 0.42)');
-    const V = state.hull.vertices;
-    const tris = [];
-    for (const [i0, i1, i2] of state.hull.faces) {
-      const p0 = project3DWithBasis(V[i0], basis), p1 = project3DWithBasis(V[i1], basis), p2 = project3DWithBasis(V[i2], basis);
-      if (!p0 || !p1 || !p2) continue;
-      const ux = V[i1][0]-V[i0][0], uy = V[i1][1]-V[i0][1], uz = V[i1][2]-V[i0][2];
-      const vx = V[i2][0]-V[i0][0], vy = V[i2][1]-V[i0][1], vz = V[i2][2]-V[i0][2];
-      let nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
-      const nn = Math.hypot(nx, ny, nz) || 1;
-      nx /= nn; ny /= nn; nz /= nn;
-      const shade = Math.max(0.25, Math.min(1.0, 0.55 + 0.45 * (0.4*nx - 0.3*ny + 0.85*nz)));
-      tris.push({ p0, p1, p2, depth: (p0[2] + p1[2] + p2[2]) / 3, shade });
-    }
-    tris.sort((a, b) => b.depth - a.depth);
-    for (const t of tris) {
-      ctx.beginPath();
-      ctx.moveTo(t.p0[0], t.p0[1]);
-      ctx.lineTo(t.p1[0], t.p1[1]);
-      ctx.lineTo(t.p2[0], t.p2[1]);
-      ctx.closePath();
-      const g = Math.round(165 * t.shade + 55);
-      ctx.fillStyle = `rgba(56, ${g}, 245, ${fillAlpha})`;
-      ctx.fill();
-      ctx.strokeStyle = strokeCol;
-      ctx.lineWidth = dimHull ? 0.6 : (isSeeThrough && showSolidStructure ? 1.15 : 0.9);
-      ctx.stroke();
-    }
-  }
+  // Build 3D Convex Hull triangles according to Hull: Visible (solid) vs Hull: See-Through
+  const hullTris = buildHullDrawTris(state.hull, hullIsSeeThrough, showSolidStructure, objIsSeeThrough, basis);
+  const hasHull = hullTris.all.length > 0;
 
-  // Compute object center camera depth so front/back tactile points layer naturally around solid 3D render
+  // Compute solid center camera depth so far/near tactile points layer cleanly around any solid mesh
   let objCamDepth = null;
-  if (!isSeeThrough && showSolidStructure && tracked && tracked.pose) {
-    const spObj = project3DWithBasis([tracked.pose.x_m, tracked.pose.y_m, tracked.pose.z_center_m], basis);
+  const anySolidMesh = (showSolidStructure && !objIsSeeThrough) || (hasHull && !hullIsSeeThrough);
+  if (anySolidMesh) {
+    const refCenter = (tracked && tracked.pose)
+      ? [tracked.pose.x_m, tracked.pose.y_m, tracked.pose.z_center_m]
+      : focusPt;
+    const spObj = project3DWithBasis(refCenter, basis);
     if (spObj) objCamDepth = spObj[2];
   }
 
-  // 3a. Far-side tactile points (behind solid object)
+  // 2a. Far-side tactile points (behind solid object / solid hull)
   const hasPts = showPoints && state.cloud && state.cloud.points && state.cloud.points.length > 0;
   if (hasPts && objCamDepth !== null) {
     drawPointSubset(state.cloud.points, basis, zT, objCamDepth, false, true);
   }
 
-  // 3b. Object Render: High-Visibility Structured 3D Twin when >90% confirmed (or ghost preview while <90%)
-  if (tracked) {
-    if (showSolidStructure) {
-      renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, zT);
-    } else {
+  // 2b. Render 3D Convex Hull + Predefined 3D Object across all 4 (Visible / See-Through) combinations
+  if (!showSolidStructure) {
+    drawTriList(hullTris.all);
+    if (tracked) {
       drawPreviewWireframe(tracked, basis);
     }
+  } else if (!objIsSeeThrough && !hullIsSeeThrough) {
+    // Object: Visible + Hull: Visible -> unified 3D depth-sorted solid triangles
+    renderConfirmedStructure(tracked, isConfirmed90, false, basis, zT, hullTris.front, null);
+  } else if (objIsSeeThrough && !hullIsSeeThrough) {
+    // Object: See-Through + Hull: Visible -> solid 3D Convex Hull inside see-through Object shell
+    drawTriList(hullTris.front);
+    renderConfirmedStructure(tracked, isConfirmed90, true, basis, zT, null, null);
+  } else if (!objIsSeeThrough && hullIsSeeThrough) {
+    // Object: Visible + Hull: See-Through -> back hull behind solid Object, front see-through hull veil over it
+    drawTriList(hullTris.back);
+    renderConfirmedStructure(tracked, isConfirmed90, false, basis, zT, null, hullTris.front);
+  } else {
+    // Object: See-Through + Hull: See-Through -> both translucent
+    drawTriList(hullTris.all);
+    renderConfirmedStructure(tracked, isConfirmed90, true, basis, zT, null, null);
   }
 
-  // 3c. Near-side tactile points (hugging the front surface of the 3D render!)
+  // 2c. Near-side tactile points (hugging the front surface of the 3D render!)
   if (hasPts) {
     drawPointSubset(state.cloud.points, basis, zT, objCamDepth, true, false);
   }
@@ -1447,23 +1543,6 @@ function updateSidebar() {
     </div>`;
   }).join('');
   document.getElementById('match-advice').textContent = state.catalog.advice || '';
-
-  if (state.g1_plan) {
-    const g1 = state.g1_plan;
-    const mj = state.mujoco_result || {};
-    document.getElementById('g1-summary').textContent =
-      `MuJoCo Twin Gate : ${mj.outcome?.toUpperCase()} (squeeze ${mj.peak_squeeze_n} N / max ${g1.object.max_safe_grip_n} N)\n` +
-      `Unitree G1 Arm   : ${g1.arm.toUpperCase()} (safe_to_execute=${g1.safe_to_execute})\n` +
-      `G1 Base Target   : [${g1.object_pose_g1_base.position_m.join(', ')}] m, yaw=${g1.object_pose_g1_base.yaw_deg}°\n` +
-      `Dex3-1 q_grasp   : [${g1.dex3_1_hand.q_grasp_rad.join(', ')}]\n` +
-      `Dex3-1 tau_ff Nm : [${g1.dex3_1_hand.tau_ff_nm.join(', ')}]\n` +
-      `Saved JSON       : ${state.session_dir}/unitree_g1_pick.json`;
-  } else if (state.phase === 'carrying' && state.tracked_object) {
-    const p = state.tracked_object.pose;
-    document.getElementById('g1-summary').textContent =
-      `CARRYING IN HAND: (${(p.x_m*100).toFixed(1)}, ${(p.y_m*100).toFixed(1)}, ${(p.z_center_m*100).toFixed(1)}) cm | yaw ${p.yaw_deg}°\n` +
-      `Set object anywhere on flat surface & trigger PLACED (✌️ or Space).`;
-  }
 
   document.getElementById('event-log').textContent = (state.events || []).slice().reverse().join('\n');
 }
