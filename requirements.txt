@@ -1,4 +1,9 @@
 numpy>=1.26
-pyserial>=3.5   # reading the real glove
+scipy>=1.11     # touchmap template fitting & fast 3D ConvexHull (scan_track also has a pure-numpy fallback)
+pyserial>=3.5   # reading the real tap glove / serial button
 mujoco>=3.0     # twins, Rokoko hand and robot grasp simulation
 pillow>=10.1    # GIFs in the visual test report
+# Optional extras for live Rokoko LZ4 packets or Rerun viewer:
+# lz4
+# rerun-sdk>=0.43
+

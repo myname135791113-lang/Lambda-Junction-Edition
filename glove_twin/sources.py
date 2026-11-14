@@ -18,13 +18,20 @@ class SerialGlove:
             import serial  # pyserial
         except ImportError as e:
             raise SystemExit("Reading the glove needs pyserial: pip install pyserial") from e
-        self._serial = serial.Serial(port, baud, timeout=1.0)
+        try:
+            self._serial = serial.Serial(port, baud, timeout=1.0)
+        except Exception as e:
+            raise SystemExit(f"Could not open serial port {port!r}: {e}") from e
         self._cal = cal
 
     def taps(self, n: int) -> Iterator[TapEvent]:
         got = 0
         while got < n:
-            line = self._serial.readline().decode("ascii", errors="ignore").strip()
+            try:
+                raw = self._serial.readline()
+            except Exception as e:
+                raise SystemExit(f"Serial read failed: {e}") from e
+            line = raw.decode("ascii", errors="ignore").strip()
             if not line:
                 continue
             tap = parse_packet(line, self._cal)

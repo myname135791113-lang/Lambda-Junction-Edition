@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
@@ -84,6 +85,13 @@ def write_twin(props: dict, out_dir: str | Path) -> dict[str, Path]:
     name = props["object"]
     dims = tuple(props["geometry"]["dims_m"]) if props["geometry"]["dims_m"] else None
     mesh = props["geometry"]["mesh"]
+    xml_mesh = mesh
+    if mesh:
+        mesh_p = Path(mesh)
+        if not mesh_p.is_absolute():
+            xml_mesh = Path(os.path.relpath(mesh_p.resolve(), out.resolve())).as_posix()
+        else:
+            xml_mesh = mesh_p.as_posix()
     mass_kg = props["mass_g"] / 1000.0 if props["mass_g"] else None
 
     paths = {
@@ -93,8 +101,8 @@ def write_twin(props: dict, out_dir: str | Path) -> dict[str, Path]:
     }
     paths["properties"].write_text(json.dumps(props, indent=2), encoding="utf-8")
     paths["glove"].write_text(mjcf(name, friction=props["friction_prior"], mass_kg=mass_kg,
-                                   density=props["density_kg_m3"]["value"], dims_m=dims, mesh=mesh,
+                                   density=props["density_kg_m3"]["value"], dims_m=dims, mesh=xml_mesh,
                                    variant="glove"), encoding="utf-8")
     paths["default"].write_text(mjcf(name, friction=DEFAULT_FRICTION, density=DEFAULT_DENSITY,
-                                     dims_m=dims, mesh=mesh, variant="default"), encoding="utf-8")
+                                     dims_m=dims, mesh=xml_mesh, variant="default"), encoding="utf-8")
     return paths

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -293,8 +295,12 @@ def _fit_single_primitive_irls(
 
     r_best = _sdf_table_primitive(shape, best_x, P, z_table)
     rms_m = float(np.sqrt(np.mean(r_best ** 2)))
+    med_abs_m = float(np.median(np.abs(r_best)))
     bic = best_dev + k * math.log(max(len(P), k + 1))
-    return {"shape": shape, "params": best_x, "k": k, "rms_m": rms_m, "deviance": best_dev, "bic": bic}
+    return {
+        "shape": shape, "params": best_x, "residuals": r_best, "k": k,
+        "rms_m": rms_m, "median_abs_m": med_abs_m, "deviance": best_dev, "bic": bic,
+    }
 
 
 def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> dict[str, Any]:
@@ -357,12 +363,20 @@ def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> 
     fits["box"]["center_xy"] = [float(bp[0]), float(bp[1])]
     fits["box"]["yaw_rad"] = float(bp[2])
 
+    # Adaptive MAD noise floor prevents overconfident wrong labels when real-sensor jitter > 3.5 mm
+    sigma_eff = max(SIGMA_FIT_M, 1.4826 * min(fits[m]["median_abs_m"] for m in ("box", "cylinder", "sphere")))
+    n_pts = max(len(P), 7)
+    for m in ("box", "cylinder", "sphere"):
+        z_scaled = fits[m]["residuals"] / sigma_eff
+        fits[m]["bic"] = float(np.sum(np.log1p(z_scaled * z_scaled))) + fits[m]["k"] * math.log(n_pts)
+        del fits[m]["residuals"]
+
     bics = np.array([fits[m]["bic"] for m in ("box", "cylinder", "sphere")])
     w = np.exp(-0.5 * (bics - bics.min()))
     w /= w.sum()
     weights = {m: round(float(val), 4) for m, val in zip(("box", "cylinder", "sphere"), w)}
     best = max(weights, key=weights.get)
-    return {"best": best, "weights": weights, "fits": fits}
+    return {"best": best, "weights": weights, "sigma_eff_m": round(sigma_eff, 5), "fits": fits}
 
 
 # --------------------------------------------------------------------------- Cloud Accumulator
@@ -500,12 +514,16 @@ class TactileCloudBuilder:
         self._dirty = False
         return summary
 
-    def export_ply(self, path: str) -> None:
+    def export_ply(self, path: str | Path) -> None:
+        p_out = Path(path)
         P = self.points() * 1000.0  # export in mm for MeshLab / CloudCompare compatibility
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                f"ply\nformat ascii 1.0\nelement vertex {len(P)}\n"
-                "property float x\nproperty float y\nproperty float z\nend_header\n"
-            )
-            if len(P):
-                np.savetxt(f, P, fmt="%.2f")
+        P = P[np.all(np.isfinite(P), axis=1)] if len(P) else P
+        lines = "\n".join(f"{r[0]:.2f} {r[1]:.2f} {r[2]:.2f}" for r in P)
+        text = (
+            f"ply\nformat ascii 1.0\nelement vertex {len(P)}\n"
+            "property float x\nproperty float y\nproperty float z\nend_header\n"
+            + (lines + "\n" if lines else "")
+        )
+        tmp = p_out.with_name(f"{p_out.name}.{os.getpid()}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p_out)

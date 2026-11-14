@@ -146,6 +146,35 @@ class RokokoAndGestureTests(unittest.TestCase):
         # Palm-down hand -> palmar normal points downward (-Z), so pad Z < bone Z by ~7 mm!
         self.assertLess(fr.right.tips_pad["index"][2], fr.right.tips_bone["index"][2] - 0.005)
 
+        # Injecting NaN into a finger tip drops the corrupt hand cleanly rather than poisoning downstream math
+        body["rightIndexTip"]["position"]["x"] = float("nan")
+        fr_nan = parse_rokoko_frame(pkt, mode="coil", pad_offset_m=0.007)
+        self.assertIsNone(fr_nan.right)
+
+        # Also verify true Rokoko Studio JSON v4 Newton flat joint array (RightFinger1..5)
+        newton_joints = [
+            {"name": "RightHand", "position": {"x": 0.0, "y": 0.05, "z": 0.25}},
+            {"name": "RightFinger1Metacarpal", "position": {"x": -0.020, "y": 0.05, "z": 0.26}},
+            {"name": "RightFinger1Proximal", "position": {"x": -0.035, "y": 0.05, "z": 0.28}},
+            {"name": "RightFinger1Tip", "position": {"x": -0.055, "y": 0.05, "z": 0.33}},
+            {"name": "RightFinger2Metacarpal", "position": {"x": -0.025, "y": 0.05, "z": 0.28}},
+            {"name": "RightFinger2Proximal", "position": {"x": -0.025, "y": 0.05, "z": 0.32}},
+            {"name": "RightFinger2Distal", "position": {"x": -0.025, "y": 0.05, "z": 0.37}},
+            {"name": "RightFinger2Tip", "position": {"x": -0.025, "y": 0.05, "z": 0.39}},
+            {"name": "RightFinger3Proximal", "position": {"x": -0.005, "y": 0.05, "z": 0.32}},
+            {"name": "RightFinger3Tip", "position": {"x": -0.005, "y": 0.05, "z": 0.40}},
+            {"name": "RightFinger4Proximal", "position": {"x": 0.015, "y": 0.05, "z": 0.31}},
+            {"name": "RightFinger4Tip", "position": {"x": 0.015, "y": 0.05, "z": 0.39}},
+            {"name": "RightFinger5Proximal", "position": {"x": 0.032, "y": 0.05, "z": 0.30}},
+            {"name": "RightFinger5Tip", "position": {"x": 0.032, "y": 0.05, "z": 0.37}},
+        ]
+        pkt_newton = {"version": "3,0", "timestamp": 12.4, "scene": {"newtons": [{"joints": newton_joints}]}}
+        fr_newton = parse_rokoko_frame(pkt_newton, mode="coil", pad_offset_m=0.007)
+        self.assertIsNotNone(fr_newton.right)
+        assert fr_newton.right is not None
+        self.assertAlmostEqual(fr_newton.right.joints["index_mcp"][1], 0.32, places=5)
+        self.assertLess(fr_newton.right.tips_pad["index"][2], fr_newton.right.tips_bone["index"][2] - 0.005)
+
 
 class RelocationAndEndToEndTests(unittest.TestCase):
     def test_relocation_snaps_vertical_drift_and_tracks_move(self):

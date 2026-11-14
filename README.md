@@ -9,10 +9,21 @@ grasp that kind of object, and how hard to squeeze.
 
 ```bash
 pip install -r requirements.txt
+python -m scan_track live --source synthetic                   # live 3D Convex Hull + catalog + Unitree G1 dashboard
+python -m scan_track live --source rokoko --mode planted       # real Rokoko Smartgloves II (or --mode coil with Coil Pro)
 python -m glove_twin map --object redbull --simulate --robot   # one object, card + robot grasp
 python -m glove_twin.visual                                    # full visual report, opens in the browser
-python -m unittest discover -s tests -v                        # all tests (~5 min)
+python touchmap/touchmap_grasp.py --bench 10                   # multi-grasp point-cloud shape fitter benchmark
+python -m unittest discover -s tests -v                        # all tests
 ```
+
+## Repository Packages
+
+| Package | Role | Docs |
+|---|---|---|
+| `scan_track/` | **Live Rokoko Smartgloves II (+ Coil Pro) 3D point cloud, Convex Hull, left-hand gesture controller, catalog matcher, pick-and-place relocation tracker & Unitree G1 Humanoid bridge** | [`scan_track/README.md`](scan_track/README.md), [`PLAN_3D_SCAN_AND_TRACKING.md`](PLAN_3D_SCAN_AND_TRACKING.md) |
+| `glove_twin/` | **Object cards, reference catalog (`objects.py`), tap material classification, gloves-only joint shape fitting & MuJoCo robot-hand grasp simulation** | Below |
+| `touchmap/` | **Multi-grasp world-frame fingertip point-cloud fitter (`box` / `cylinder` / `sphere`) with Cauchy + adaptive-MAD BIC scoring & optional Rerun 3D viewer** | [`touchmap/SPEC.md`](touchmap/SPEC.md) |
 
 ## Touch mapping: box, cylinder, sphere
 

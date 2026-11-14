@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import math
+import re
 import socket
 import threading
 import time
@@ -36,13 +37,13 @@ FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
 LZ4_MAGIC = b"\x04\x22\x4d\x18"
 DEFAULT_PAD_OFFSET_M = 0.007  # ~7 mm from distal bone tip centre to palmar skin pulp
 
-# Flexible token rules matching both Rokoko Studio camelCase and OpenXR/SDK snake_case
+# Flexible token rules matching Rokoko Studio v3 camelCase, v4 Newton (Finger1..5), and OpenXR/SDK snake_case
 _FINGER_ALIASES: dict[str, tuple[str, ...]] = {
-    "thumb": ("thumb",),
-    "index": ("index",),
-    "middle": ("middle", "mid"),
-    "ring": ("ring",),
-    "pinky": ("little", "pinky"),
+    "thumb": ("thumb", "finger1"),
+    "index": ("index", "finger2"),
+    "middle": ("middle", "mid", "finger3"),
+    "ring": ("ring", "finger4"),
+    "pinky": ("little", "pinky", "finger5"),
 }
 _STAGE_ALIASES: dict[str, tuple[str, ...]] = {
     "mcp": ("proximal", "mcp", "metacarpal"),
@@ -244,19 +245,34 @@ def walk_rokoko_joints(
 
 
 def _extract_xyz(pos: Any) -> list[float] | None:
-    if isinstance(pos, dict) and all(k in pos for k in ("x", "y", "z")):
-        return [float(pos["x"]), float(pos["y"]), float(pos["z"])]
-    if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-        return [float(pos[0]), float(pos[1]), float(pos[2])]
-    return None
+    try:
+        if isinstance(pos, dict) and all(k in pos for k in ("x", "y", "z")):
+            vals = [float(pos["x"]), float(pos["y"]), float(pos["z"])]
+        elif isinstance(pos, (list, tuple)) and len(pos) >= 3:
+            vals = [float(pos[0]), float(pos[1]), float(pos[2])]
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return vals if all(math.isfinite(v) for v in vals) else None
 
 
 def _extract_xyzw(rot: Any) -> tuple[float, float, float, float] | None:
-    if isinstance(rot, dict) and all(k in rot for k in ("x", "y", "z", "w")):
-        return (float(rot["x"]), float(rot["y"]), float(rot["z"]), float(rot["w"]))
-    if isinstance(rot, (list, tuple)) and len(rot) >= 4:
-        return (float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]))
-    return None
+    try:
+        if isinstance(rot, dict) and all(k in rot for k in ("x", "y", "z", "w")):
+            vals = (float(rot["x"]), float(rot["y"]), float(rot["z"]), float(rot["w"]))
+        elif isinstance(rot, (list, tuple)) and len(rot) >= 4:
+            vals = (float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]))
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return vals if all(math.isfinite(v) for v in vals) else None
+
+
+def _joint_tokens(name: str) -> set[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return {tok.lower() for tok in re.findall(r"finger[1-5]|[A-Za-z]+|\d+", spaced, flags=re.IGNORECASE)}
 
 
 def _unity_to_rh_zup(xyz: list[float]) -> np.ndarray:
@@ -281,7 +297,8 @@ def parse_rokoko_frame(
     hands: dict[str, HandPose | None] = {"right": None, "left": None}
 
     # Check if single-hand SDK stream omits "left"/"right" prefixes (defaults to right hand)
-    any_side_tag = any(("right" in n.lower() or "left" in n.lower()) for n, _, _ in raw_joints)
+    tokenized_joints = [(name, _joint_tokens(name), xyz, quat) for name, xyz, quat in raw_joints]
+    any_side_tag = any(("right" in toks or "left" in toks) for _, toks, _, _ in tokenized_joints)
 
     for side in ("right", "left"):
         tips_bone: dict[str, np.ndarray] = {}
@@ -289,32 +306,32 @@ def parse_rokoko_frame(
         wrist_pos: np.ndarray | None = None
         wrist_quat: tuple[float, float, float, float] | None = None
 
-        for name, xyz, quat in raw_joints:
-            low = name.lower()
+        for name, toks, xyz, quat in tokenized_joints:
             if any_side_tag:
-                if side not in low:
+                if side not in toks:
                     continue
             elif side == "left":
                 continue
 
             p = _unity_to_rh_zup(xyz)
+            has_finger_tok = any(fk in toks for aliases in _FINGER_ALIASES.values() for fk in aliases)
 
             # Match wrist / hand hub (exclude finger joints)
-            if any(w in low for w in ("wrist", "hand", "hub", "palm")) and not any(
-                fk in low for aliases in _FINGER_ALIASES.values() for fk in aliases
-            ):
-                if wrist_pos is None or "wrist" in low or low.endswith("hand") or "hub" in low:
+            if (toks & {"wrist", "hand", "hub", "palm"}) and not has_finger_tok:
+                if wrist_pos is None or ("wrist" in toks or "hub" in toks or name.lower().endswith("hand")):
                     wrist_pos = p
                     wrist_quat = quat
                 continue
 
             for finger, f_keys in _FINGER_ALIASES.items():
-                if not any(fk in low for fk in f_keys):
+                if not any(fk in toks for fk in f_keys):
                     continue
                 for stage, s_keys in _STAGE_ALIASES.items():
-                    if any(sk in low for sk in s_keys):
+                    if any(sk in toks for sk in s_keys):
                         if stage == "tip":
                             tips_bone.setdefault(finger, p)
+                        elif stage == "mcp" and ("proximal" in toks or "mcp" in toks):
+                            inter[f"{finger}_{stage}"] = p
                         else:
                             inter.setdefault(f"{finger}_{stage}", p)
                         break
@@ -360,16 +377,19 @@ class RokokoUDPReceiver:
         *,
         mode: str = "planted",
         pad_offset_m: float = DEFAULT_PAD_OFFSET_M,
+        max_age_s: float = 1.0,
         dump_first: bool = False,
     ):
         self.port = port
         self.mode = mode
         self.pad_offset_m = pad_offset_m
+        self.max_age_s = max_age_s
         self.dump_first = dump_first
         self.planted_anchor_right = np.array([0.0, 0.25, 0.035])
         self._lock = threading.Lock()
         self._latest_raw: dict[str, Any] | None = None
         self._latest_frame: DualHandFrame | None = None
+        self._last_recv_mono: float = 0.0
         self._packets_received = 0
         self._last_error: str | None = None
         self._running = True
@@ -423,21 +443,30 @@ class RokokoUDPReceiver:
                     frame.seq = self._packets_received
                     self._latest_raw = pkt
                     self._latest_frame = frame
+                    self._last_recv_mono = time.monotonic()
                     self._last_error = None
             except Exception as exc:  # pragma: no cover - defensive against malformed UDP
                 with self._lock:
                     self._last_error = str(exc)
 
-    def latest(self) -> DualHandFrame | None:
+    def latest(self, *, require_fresh: bool = False) -> DualHandFrame | None:
         with self._lock:
+            if self._latest_frame is None:
+                return None
+            if require_fresh and self.max_age_s > 0 and (time.monotonic() - self._last_recv_mono) > self.max_age_s:
+                return None
             return self._latest_frame
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            age_s = (time.monotonic() - self._last_recv_mono) if self._last_recv_mono > 0 else None
+            stale = bool(age_s is None or (self.max_age_s > 0 and age_s > self.max_age_s))
             return {
                 "port": self.port,
                 "mode": self.mode,
                 "packets_received": self._packets_received,
+                "stale": stale,
+                "frame_age_ms": None if age_s is None else round(age_s * 1000.0, 1),
                 "has_right": bool(self._latest_frame and self._latest_frame.right is not None),
                 "has_left": bool(self._latest_frame and self._latest_frame.left is not None),
                 "last_error": self._last_error,

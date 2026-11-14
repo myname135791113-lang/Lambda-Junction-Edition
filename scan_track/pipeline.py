@@ -69,8 +69,15 @@ class ScanTrackSession:
         self.relocation = RelocationTracker(z_table=self.cal.z_table)
 
         self.sessions_root = Path(sessions_root)
-        self.session_dir = self.sessions_root / time.strftime(f"%Y%m%d_%H%M%S_{source}")
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_root.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() % 1_000_000:06d}_{source}"
+        cand = self.sessions_root / stamp
+        idx = 1
+        while cand.exists():
+            cand = self.sessions_root / f"{stamp}_{idx:02d}"
+            idx += 1
+        cand.mkdir(parents=True, exist_ok=False)
+        self.session_dir = cand
 
         self.rokoko: RokokoUDPReceiver | None = None
         self.synthetic: SyntheticExplorationStream | None = None
@@ -91,6 +98,7 @@ class ScanTrackSession:
         self._g1_plan: dict[str, Any] | None = None
         self._event_log: list[str] = ["Session initialized. Ready to scan on flat surface."]
         self._prev_synth_t: float = 0.0
+        self._last_processed_seq: int = -1
         self._fps_ema: float = 0.0
         self._last_tick_t: float = time.time()
 
@@ -140,9 +148,10 @@ class ScanTrackSession:
                 self._prev_synth_t = cycle_pos
             else:
                 assert self.rokoko is not None
-                raw_frame = self.rokoko.latest()
-                if raw_frame is None:
+                raw_frame = self.rokoko.latest(require_fresh=True)
+                if raw_frame is None or raw_frame.seq == self._last_processed_seq:
                     return self._snapshot_unlocked()
+                self._last_processed_seq = raw_frame.seq
 
             frame_ws = DualHandFrame(
                 timestamp=raw_frame.timestamp,

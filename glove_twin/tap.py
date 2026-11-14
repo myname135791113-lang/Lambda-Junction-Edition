@@ -42,17 +42,40 @@ class FsrCalibration:
 
 
 def parse_packet(line: str, cal: FsrCalibration = FsrCalibration()) -> TapEvent | None:
-    """Parse one JSON line from firmware/tap_glove. Returns None for non-tap lines."""
+    """Parse one JSON line from firmware/tap_glove. Returns None for non-tap or malformed lines."""
     try:
         d = json.loads(line)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None
-    if not isinstance(d, dict) or "piezo" not in d or "fsr" not in d:
+    if not isinstance(d, dict) or "piezo" not in d or "fsr" not in d or "fs" not in d:
         return None
-    adc_max = (1 << int(d.get("adc_bits", 12))) - 1
-    mid = adc_max / 2
-    piezo = (np.asarray(d["piezo"], float) - mid) / mid
-    force = cal.counts_to_newtons(np.asarray(d["fsr"], float), adc_max)
-    mic = (np.asarray(d["mic"], float) - mid) / mid if d.get("mic") else None
-    return TapEvent(fs=int(d["fs"]), piezo=piezo, force_n=force, mic=mic,
-                    pretrigger=int(d.get("pre", 64)))
+    try:
+        fs = int(d["fs"])
+        adc_bits = int(d.get("adc_bits", 12))
+        pre = int(d.get("pre", 64))
+        if fs <= 0 or adc_bits <= 0 or pre < 0:
+            return None
+        adc_max = (1 << adc_bits) - 1
+        mid = adc_max / 2
+        raw_piezo = np.asarray(d["piezo"], float)
+        raw_fsr = np.asarray(d["fsr"], float)
+        if (
+            raw_piezo.ndim != 1
+            or raw_fsr.ndim != 1
+            or len(raw_piezo) == 0
+            or len(raw_piezo) != len(raw_fsr)
+            or not np.all(np.isfinite(raw_piezo))
+            or not np.all(np.isfinite(raw_fsr))
+        ):
+            return None
+        piezo = (raw_piezo - mid) / mid
+        force = cal.counts_to_newtons(raw_fsr, adc_max)
+        mic = None
+        if d.get("mic") is not None:
+            raw_mic = np.asarray(d["mic"], float)
+            if raw_mic.ndim != 1 or len(raw_mic) != len(raw_piezo) or not np.all(np.isfinite(raw_mic)):
+                return None
+            mic = (raw_mic - mid) / mid
+    except (KeyError, TypeError, ValueError):
+        return None
+    return TapEvent(fs=fs, piezo=piezo, force_n=force, mic=mic, pretrigger=min(pre, len(piezo)))
