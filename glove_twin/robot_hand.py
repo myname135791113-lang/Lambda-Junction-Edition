@@ -23,8 +23,21 @@ HOLD_JOINTS = [f"{f}_mcp_abd" for f in FINGERS] + ["thumb_cmc_abd"]
 LIFT_M = 0.10
 
 
+def _is_flat_box(obj: RefObject) -> bool:
+    return obj.shape == "box" and obj.dims["z"] < min(obj.dims["x"], obj.dims["y"])
+
+
 def _hand_frame(obj: RefObject, approach_az: float):
-    """Palm facing the object from the side, palm width along the object's long (z) axis."""
+    """Hand orientation and approach unit vector `u` (from object toward the palm's dorsal side)."""
+    if _is_flat_box(obj):
+        # Lying-down box: approach from above (+Z), palm width along the long horizontal axis,
+        # fingers/thumb opposing across the narrower horizontal width.
+        z_h = np.array([0.0, 0.0, 1.0])
+        y_h = np.array([-1.0, 0.0, 0.0]) if obj.dims["x"] >= obj.dims["y"] else np.array([0.0, 1.0, 0.0])
+        x_h = np.cross(y_h, z_h)
+        return np.column_stack([x_h, y_h, z_h]), z_h
+    if obj.shape == "box" and approach_az == 0.0 and obj.dims["y"] > obj.dims["x"]:
+        approach_az = 0.5 * np.pi
     u = np.array([np.cos(approach_az), np.sin(approach_az), 0.0])  # from object toward the hand
     z_h, y_h = u, np.array([0, 0, 1.0])
     x_h = np.cross(y_h, z_h)
@@ -37,9 +50,10 @@ def robot_scene_xml(obj: RefObject, grasp: dict, approach_az: float = 0.0) -> tu
     mujoco.mju_mat2Quat(quat, R.ravel())
     pre = PRESHAPES.get(grasp.get("preshape", "open"), PRESHAPES["open"])
     zc = obj.extents()[2] / 2
+    prio = 'priority="1" ' if obj.shape == "box" else ""
     asset, geom = object_geom_xml(
         obj, pos="0 0 0",
-        extra=(f'mass="{obj.mass_kg}" friction="{obj.friction} 0.01 0.001" contype="1" conaffinity="3" '
+        extra=(f'{prio}mass="{obj.mass_kg}" friction="{obj.friction} 0.01 0.001" contype="1" conaffinity="3" '
                f'condim="{6 if obj.shape == "sphere" else 4}"'))
     # slide axes are given in the (rotated) forearm frame, so express the world axes there
     ax = {k: R.T @ v for k, v in zip("xyz", np.eye(3))}
@@ -110,11 +124,16 @@ def robot_grasp(obj: RefObject, grasp: dict, target_squeeze_n: float, *, render:
         m.dof_armature[m.jnt_dofadr[jid]] = 2e-5
     hand_geoms = {g for g in range(m.ngeom) if m.geom_bodyid[g] in hand_bodies}
 
-    # place the hand: palm pads just off the object's side, at mid-height
+    # place the hand: palm pads just off the object's surface along `u`
     mujoco.mj_forward(m, d)
     palm = np.mean([d.geom_xpos[m.geom(f"palm_pad_{i}").id] for i in range(4)], axis=0)
     zc = obj.extents()[2] / 2
-    reach = obj.extents()[0] / 2 if obj.shape != "box" else (obj.dims["x"] / 2 if abs(u[0]) > abs(u[1]) else obj.dims["y"] / 2)
+    if _is_flat_box(obj):
+        reach = zc + 0.018
+    elif obj.shape != "box":
+        reach = obj.extents()[0] / 2
+    else:
+        reach = obj.dims["x"] / 2 if abs(u[0]) > abs(u[1]) else obj.dims["y"] / 2
     target = np.array([0, 0, zc]) + u * (reach + 0.009)
     offset = target - palm
     act = {m.actuator(i).name: i for i in range(m.nu)}
@@ -154,8 +173,8 @@ def robot_grasp(obj: RefObject, grasp: dict, target_squeeze_n: float, *, render:
                 s += abs(f6[0])
         s *= 0.5                                             # squeeze = half the summed normal force
         s_f += alpha * (s - s_f)                             # crushing needs sustained force
-        if t > 0.15:                                         # squeeze regulator (integral)
-            tau = float(np.clip(tau + 0.002 * (target_squeeze_n - s_f), 0.0, 1.2))
+        if t > 0.25:                                         # overdamped squeeze regulator after fingers wrap
+            tau = float(np.clip(tau + 0.0005 * (target_squeeze_n - (0.7 * s + 0.3 * s_f)), 0.0, 1.2))
         for j in FLEX_MOTORS:
             d.ctrl[act[f"m_{j}"]] = tau * (1.4 if j.startswith("thumb") else 1.0)
         if t > 1.0:                                          # lift

@@ -1,8 +1,11 @@
 """Touch reconstruction, the simulated exploration session, the object card and the robot hand."""
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
@@ -15,7 +18,7 @@ except ImportError:  # pragma: no cover
 class CatalogTests(unittest.TestCase):
     def test_masses_match_sources(self):
         from glove_twin.objects import OBJECTS
-        expected = {"redbull": 0.270, "profeel": 0.2658, "wood_sphere": 0.323}
+        expected = {"redbull": 0.270, "kantolan_suola_cracker": 0.153, "wood_sphere": 0.323}
         for key, m in expected.items():
             self.assertAlmostEqual(OBJECTS[key].mass_kg, m, delta=0.03 * m, msg=key)
 
@@ -60,7 +63,7 @@ class SessionTests(unittest.TestCase):
         """Only joint angles and pad readings leave the simulator: no hand or object pose."""
         from glove_twin.explore_sim import explore
         from glove_twin.objects import OBJECTS
-        frames, _, _ = explore(OBJECTS["profeel"], np.random.default_rng(0))
+        frames, _, _ = explore(OBJECTS["kantolan_suola_cracker"], np.random.default_rng(0))
         self.assertGreaterEqual(len(frames), 5)
         for f in frames:
             self.assertEqual(set(vars(f)), {"grasp_id", "kind", "joints", "fsr", "t"})
@@ -96,10 +99,12 @@ class CardAndRobotTests(unittest.TestCase):
             json.dumps(card)
 
     def test_container_mass_is_not_material_derived(self):
-        for key in ("redbull", "profeel"):
-            card = self.cards[key]
-            self.assertTrue(card["container"], key)
-            self.assertLess(card["mass_kg"], 0.32, key)      # aluminium-density would be ~0.79 kg
+        card = self.cards["redbull"]
+        self.assertTrue(card["container"])
+        self.assertLess(card["mass_kg"], 0.32)               # aluminium-density would be ~0.79 kg
+        cracker = self.cards["kantolan_suola_cracker"]
+        self.assertIn("lift", cracker["mass_source"])
+        self.assertLess(cracker["mass_kg"], 0.20)
 
     def test_robot_lifts_with_card_force_and_drops_at_30_percent(self):
         from glove_twin.objects import OBJECTS
@@ -112,7 +117,7 @@ class CardAndRobotTests(unittest.TestCase):
     def test_squeezing_above_the_limit_crushes(self):
         from glove_twin.objects import OBJECTS
         from glove_twin.robot_hand import robot_grasp
-        for key in ("redbull", "profeel"):
+        for key in ("redbull", "kantolan_suola_cracker"):
             o = OBJECTS[key]
             self.assertEqual(robot_grasp(o, self.cards[key]["grasp"], 1.5 * o.max_grip_n).outcome, "crushed", key)
 

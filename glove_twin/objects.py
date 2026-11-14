@@ -92,51 +92,6 @@ OBJECTS: dict[str, RefObject] = {o.key: o for o in [
         notes=("Crown 250 ml slim: diameter 53 mm, height 133 mm (202 diameter, 200 end).",
                "Necked top and domed base: the fitted height is the overall height."),
     ),
-    # ---------------------------------------------------------------------------------------------
-    # KNOWN ISSUES with this entry (written for the branch owner to fix; found by running the suite
-    # with the PROfeel carton replaced by this box, nothing else changed):
-    #
-    # 0. TESTS STILL NAME "profeel". It was removed, so these now raise KeyError until updated:
-    #    tests/test_scan_track.py (2 loops), tests/test_shape_fit.py (1), tests/test_touch_mapping.py
-    #    (mass table, explore(), two "container" loops). Not touched on purpose. Also README.md line 35
-    #    still lists the PROfeel carton.
-    #
-    # 1. AXIS CONVENTION (3 failing tests). shape_fit.synthetic_session documents "Box dims are
-    #    object-frame extents [x, y, z] with z the long axis", and explore_sim / robot_hand also assume
-    #    an upright object whose long axis is z (the robot palm width runs along z). To make the box
-    #    LIE DOWN in the viewer, dims here put the long side on x (195 x 66 x 45 mm), so the simulators
-    #    see a 45 mm tall object. Failures:
-    #      - tests/test_scan_track.py::test_end_to_end_pipeline_all_catalog_objects
-    #        AssertionError: 'dropped' != 'lifted'  (robot grips the wrong part of the box)
-    #      - tests/test_touch_mapping.py::CardAndRobotTests::test_robot_lifts_with_card_force_and_drops_at_30_percent
-    #        AssertionError: 'dropped' != 'lifted'
-    #      - tests/test_shape_fit.py::FitAccuracyTests::test_model_objects
-    #        0.0166 not less than 0.01 (fit error 16.6 mm on the long box, limit 10 mm)
-    #    Suggested fix: store dims upright like every other object (x=0.066, y=0.045, z=0.195) and make
-    #    the viewer lay it down (live_server.py already has a laidOnSide path for pose.upright == False,
-    #    which needs the pose z-centre to use the lying height, min(ex, ey) / 2).
-    #    With upright dims only the two issues below remain (checked).
-    #
-    # 2. HEIGHT IS MEASURED WRONG AND OVERCONFIDENT (tests/test_touch_mapping.py::SessionTests::
-    #    test_full_pipeline_each_object, 'kantolan_suola_cracker height' 0.0846 not less than 0.012).
-    #    The explorer measures height with a thumb-index pinch; the widest pinch the size-M Rokoko hand
-    #    model reaches is 169 mm (explore_sim._pinch_table), but this box is 195 mm long. With upright
-    #    dims the fit returns height 104.6 mm with sigma 2.2 mm (true 195 mm): it reports a confident
-    #    wrong number instead of "unmeasured" (sigma = inf). Width and depth are fine (45.3 / 63.6 mm).
-    #    Suggested fix: mark a pinch that saturates the hand span as unmeasured, or add an end-to-end
-    #    touch of the two ends.
-    #
-    # 3. NOT DIAGNOSED: with upright dims, test_robot_lifts_with_card_force_and_drops_at_30_percent
-    #    flips the other way ('lifted' != 'dropped'): at 30 % of the planned grip force (about 0.8 N
-    #    for 153 g, mu 0.40) the simulated hand still holds the box. Probably the light mass / friction
-    #    assumption below, not verified.
-    #
-    # 4. ASSUMPTIONS TO CHECK: size 195 x 66 x 45 mm and 153 g come from one retailer listing
-    #    (tokmanni.fi, EAN 6410380032791) quoted by a web search, which I could not open directly;
-    #    kantolan.fi lists no dimensions. max_grip_n = 10 N and friction = 0.40 are guesses. The
-    #    "cardboard" material is a stand-in for a film-wrapped cracker pack (bulk density 264 kg/m^3
-    #    is close to its 300 prior).
-    # ---------------------------------------------------------------------------------------------
     RefObject(
         key="kantolan_suola_cracker", label="Kantolan Suola Cracker 150 g box (lying down)", shape="box",
         dims={"x": 0.195, "y": 0.066, "z": 0.045},

@@ -133,7 +133,7 @@ def _orient_faces_outward(V: np.ndarray, faces: np.ndarray, interior_pt: np.ndar
 def _incremental_hull_3d_numpy(points_m: np.ndarray) -> Hull3D | None:
     """Self-contained pure-NumPy incremental 3D Convex Hull for <= ~500 voxelized points."""
     rng = np.random.default_rng(42)
-    V = points_m + rng.normal(0.0, 1e-7, points_m.shape)  # tiny general-position tie-breaker
+    V = points_m + rng.normal(0.0, 1e-6, points_m.shape)  # general-position tie-breaker above float rounding
     n = len(V)
 
     i0 = int(np.argmin(V[:, 0]))
@@ -169,28 +169,54 @@ def _incremental_hull_3d_numpy(points_m: np.ndarray) -> Hull3D | None:
         normals = np.cross(b - a, c - a)
         norms = np.maximum(np.linalg.norm(normals, axis=1), 1e-15)
         signed_d = np.einsum("ij,ij->i", normals, p - a) / norms
-        vis_mask = signed_d > 1e-6
-        if not np.any(vis_mask):
+        f_start = int(np.argmax(signed_d))
+        if signed_d[f_start] <= 1e-6:
             continue
 
-        vis_faces = faces[vis_mask]
-        keep_faces = faces[~vis_mask]
+        # Flood-fill connected visible patch from furthest-visible face to preserve 2-manifold convexity
+        edge_to_face: dict[tuple[int, int], int] = {}
+        for fi, (f0, f1, f2) in enumerate(faces):
+            edge_to_face[(int(f0), int(f1))] = fi
+            edge_to_face[(int(f1), int(f2))] = fi
+            edge_to_face[(int(f2), int(f0))] = fi
+
+        vis_set = {f_start}
+        stack = [f_start]
+        while stack:
+            fi = stack.pop()
+            f0, f1, f2 = int(faces[fi, 0]), int(faces[fi, 1]), int(faces[fi, 2])
+            for u, v in ((f0, f1), (f1, f2), (f2, f0)):
+                nb = edge_to_face.get((v, u))
+                if nb is not None and nb not in vis_set and signed_d[nb] > 1e-12:
+                    vis_set.add(nb)
+                    stack.append(nb)
 
         # Horizon edges: directed edges of visible faces whose reverse edge is NOT in visible faces
         vis_edges = set()
-        for f0, f1, f2 in vis_faces:
-            vis_edges.add((int(f0), int(f1)))
-            vis_edges.add((int(f1), int(f2)))
-            vis_edges.add((int(f2), int(f0)))
+        for fi in vis_set:
+            f0, f1, f2 = int(faces[fi, 0]), int(faces[fi, 1]), int(faces[fi, 2])
+            vis_edges.add((f0, f1))
+            vis_edges.add((f1, f2))
+            vis_edges.add((f2, f0))
 
-        new_tris = []
-        for u, v in vis_edges:
-            if (v, u) not in vis_edges:
-                new_tris.append([u, v, idx])
-
-        if not new_tris:
+        horizon = [(u, v) for (u, v) in vis_edges if (v, u) not in vis_edges]
+        if len(horizon) < 3:
             continue
-        new_arr = _orient_faces_outward(V, np.array(new_tris, dtype=int), interior)
+
+        # Ensure the horizon forms a simple closed loop (every boundary vertex has out-degree 1, in-degree 1)
+        out_deg: dict[int, int] = {}
+        in_deg: dict[int, int] = {}
+        for u, v in horizon:
+            out_deg[u] = out_deg.get(u, 0) + 1
+            in_deg[v] = in_deg.get(v, 0) + 1
+        if any(d != 1 for d in out_deg.values()) or set(out_deg.keys()) != set(in_deg.keys()):
+            continue
+
+        keep_mask = np.ones(len(faces), dtype=bool)
+        for fi in vis_set:
+            keep_mask[fi] = False
+        keep_faces = faces[keep_mask]
+        new_arr = _orient_faces_outward(V, np.array([[u, v, idx] for (u, v) in horizon], dtype=int), interior)
         faces = np.vstack([keep_faces, new_arr]) if len(keep_faces) else new_arr
 
     # Volume & surface area from outward triangles on original unjittered coordinates
@@ -306,7 +332,7 @@ def _fit_single_primitive_irls(
 def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> dict[str, Any]:
     """Fit table-resting `sphere`, `cylinder`, and `box` models and score via BIC."""
     if len(P) < 7:
-        return {"best": None, "weights": {"box": 0.33, "cylinder": 0.34, "sphere": 0.33}, "fits": {}}
+        return {"best": None, "weights": {"box": 0.0, "cylinder": 0.0, "sphere": 0.0}, "fits": {}}
 
     cx, cy = float(obb["center_xy"][0]), float(obb["center_xy"][1])
     H_obs = max(float(P[:, 2].max() - z_table), 0.02)
@@ -511,6 +537,7 @@ class TactileCloudBuilder:
     def __init__(self, *, voxel_m: float = 0.004, z_table: float = 0.0):
         self.voxel_m = voxel_m
         self.z_table = z_table
+        self.locked: bool = False
         self._voxels: dict[tuple[int, int, int], tuple[np.ndarray, int]] = {}
         self._n_raw: int = 0
         self.calipers_m: list[float] = []
@@ -520,6 +547,7 @@ class TactileCloudBuilder:
     def reset(self, z_table: float | None = None) -> None:
         if z_table is not None:
             self.z_table = z_table
+        self.locked = False
         self._voxels.clear()
         self._n_raw = 0
         self.calipers_m.clear()
@@ -528,6 +556,8 @@ class TactileCloudBuilder:
 
     def add_points(self, points_m: np.ndarray) -> int:
         """Filter table penetration, snap near-table seam contacts, and update voxel centroids."""
+        if self.locked:
+            return 0
         pts = np.asarray(points_m, dtype=float).reshape(-1, 3)
         added = 0
         for p in pts:
@@ -560,6 +590,8 @@ class TactileCloudBuilder:
         return added
 
     def add_caliper_width(self, width_m: float) -> None:
+        if self.locked:
+            return
         if 0.010 <= width_m <= 0.250:
             self.calipers_m.append(round(float(width_m), 4))
             self._dirty = True
@@ -618,7 +650,7 @@ class TactileCloudBuilder:
                 hull_volume_m3=0.0,
                 hull_area_m2=0.0,
                 calipers_m=list(self.calipers_m),
-                primitive_fit={"best": None, "weights": {"box": 0.33, "cylinder": 0.34, "sphere": 0.33}, "fits": {}},
+                primitive_fit={"best": None, "weights": {"box": 0.0, "cylinder": 0.0, "sphere": 0.0}, "fits": {}},
                 hull=None,
             )
             self._cached_summary = summary

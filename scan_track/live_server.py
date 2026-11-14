@@ -156,6 +156,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
   button:hover, select:hover { border-color: var(--accent); background: #2e3546; }
   button:active { background: #353e52; transform: translateY(1px); }
+  button:disabled { opacity: 0.42; cursor: not-allowed; pointer-events: none; }
   button.active-toggle { border-color: var(--lime); color: var(--lime); background: rgba(184, 255, 59, 0.10); }
   .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; text-align: center; }
   .metric-box { background: #151922; border: 1px solid var(--border); border-radius: 7px; padding: 6px 4px; }
@@ -263,8 +264,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="btn-grid">
         <button id="btn-trace" onclick="act('trace_toggle')">[T] Trace Index (👌)</button>
-        <button onclick="act('snapshot')">[G] 5-Finger Snap (✊)</button>
-        <button onclick="act('caliper')">[C] Caliper Pinch (🤏)</button>
+        <button id="btn-snap" onclick="act('snapshot')">[G] 5-Finger Snap (✊)</button>
+        <button id="btn-caliper" onclick="act('caliper')">[C] Caliper Pinch (🤏)</button>
         <button onclick="act('calibrate_table')">[B] Calibrate Table</button>
         <button id="btn-phase" onclick="act('phase')" style="grid-column: span 2;">[Space] Lock Grasp / Place Object (✌️)</button>
         <button onclick="act('reset')" style="grid-column: span 2;">[R] Reset / New Object</button>
@@ -391,9 +392,9 @@ window.addEventListener('keydown', e => {
   if (k === 'o') { toggleObjectVisMode(); return; }
   if (k === 'h') { toggleHullVisMode(); return; }
   if (k === 'v') { togglePointsVis(); return; }
-  if (k === 't') act('trace_toggle');
-  else if (k === 'g') act('snapshot');
-  else if (k === 'c') act('caliper');
+  if (k === 't') { if (state?.phase !== 'carrying') act('trace_toggle'); }
+  else if (k === 'g') { if (state?.phase !== 'carrying') act('snapshot'); }
+  else if (k === 'c') { if (state?.phase !== 'carrying') act('caliper'); }
   else if (k === 'b') act('calibrate_table');
   else if (k === 'u') act('undo').then(showUndoToast);
   else if (k === 'r') act('reset');
@@ -641,104 +642,7 @@ function resolveTrackedCandidate(st) {
   if (st.tracked_object && st.tracked_object.pose) {
     return st.tracked_object;
   }
-  // Fallback if user scans a custom/unlisted object whose primitive fit alone exceeds 90%
-  const pBest = st.cloud?.primitive_best;
-  const pWeight = pBest ? (st.cloud?.primitive_weights?.[pBest] || 0) : 0;
-  const fit = pBest ? st.cloud?.primitive_fits?.[pBest] : null;
-  if (pBest && fit && pWeight > 0.90 && (st.cloud?.n_voxels || 0) >= 14) {
-    const zT = st.calibration?.z_table || 0.0;
-    let ex = 0.06, ey = 0.06, ez = 0.06;
-    if (pBest === 'sphere') {
-      ex = ey = ez = 2.0 * (fit.dims_m.radius || 0.04);
-    } else if (pBest === 'cylinder') {
-      ex = ey = 2.0 * (fit.dims_m.radius || 0.03);
-      ez = fit.dims_m.height || 0.10;
-    } else {
-      ex = fit.dims_m.depth || 0.06;
-      ey = fit.dims_m.width || 0.06;
-      ez = fit.dims_m.height || 0.10;
-    }
-    const yaw = fit.yaw_rad || 0;
-    const cy = Math.cos(yaw), sy = Math.sin(yaw);
-    return {
-      key: 'custom_' + pBest,
-      label: 'Fitted ' + pBest.toUpperCase(),
-      shape: pBest,
-      material: 'unknown',
-      container: false,
-      sloped_top_m: 0.0,
-      mass_g: 0,
-      max_grip_n: 0,
-      extents_m: [ex, ey, ez],
-      confidence: pWeight,
-      confirmed_90: true,
-      pose: {
-        phase: st.phase || 'scanning',
-        x_m: fit.center_xy[0],
-        y_m: fit.center_xy[1],
-        z_center_m: zT + 0.5 * ez,
-        z_bottom_m: zT,
-        yaw_rad: yaw,
-        yaw_deg: yaw * 180 / Math.PI,
-        upright: true,
-        rotation: [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]],
-      }
-    };
-  }
   return null;
-}
-
-function drawPreviewWireframe(tracked, basis) {
-  const p = tracked.pose;
-  const [ex, ey, ez] = tracked.extents_m;
-  const yaw = p.yaw_rad || 0;
-  const cy = Math.cos(yaw), sy = Math.sin(yaw);
-  const R = p.rotation || [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]];
-  const center = [p.x_m, p.y_m, p.z_center_m];
-  const stroke = 'rgba(56, 217, 245, 0.44)';
-
-  if (tracked.shape === 'cylinder') {
-    const rad = ex * 0.5, hz = ez * 0.5, N = 24;
-    for (const zOff of [-hz, hz]) {
-      for (let i = 0; i < N; i++) {
-        const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2;
-        drawLine3D(
-          xformLocal(rad * Math.cos(a0), rad * Math.sin(a0), zOff, R, center, false),
-          xformLocal(rad * Math.cos(a1), rad * Math.sin(a1), zOff, R, center, false),
-          stroke, 1.6, [4, 4], basis
-        );
-      }
-    }
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2;
-      drawLine3D(
-        xformLocal(rad * Math.cos(a), rad * Math.sin(a), -hz, R, center, false),
-        xformLocal(rad * Math.cos(a), rad * Math.sin(a), hz, R, center, false),
-        stroke, 1.3, [4, 4], basis
-      );
-    }
-  } else if (tracked.shape === 'sphere') {
-    const rad = ex * 0.5, N = 24;
-    for (let ring = 0; ring < 3; ring++) {
-      for (let i = 0; i < N; i++) {
-        const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2;
-        const p0 = ring === 0 ? [rad*Math.cos(a0), rad*Math.sin(a0), 0]
-                 : (ring === 1 ? [rad*Math.cos(a0), 0, rad*Math.sin(a0)] : [0, rad*Math.cos(a0), rad*Math.sin(a0)]);
-        const p1 = ring === 0 ? [rad*Math.cos(a1), rad*Math.sin(a1), 0]
-                 : (ring === 1 ? [rad*Math.cos(a1), 0, rad*Math.sin(a1)] : [0, rad*Math.cos(a1), rad*Math.sin(a1)]);
-        drawLine3D(xformLocal(p0[0], p0[1], p0[2], R, center, false), xformLocal(p1[0], p1[1], p1[2], R, center, false), stroke, 1.6, [4, 4], basis);
-      }
-    }
-  } else {
-    const hx = ex * 0.5, hy = ey * 0.5, hz = ez * 0.5;
-    const slope = tracked.sloped_top_m || 0;
-    const corners = [
-      [-hx,-hy,-hz],[hx,-hy,-hz],[hx,hy,-hz],[-hx,hy,-hz],
-      [-hx,-hy,hz],[hx,-hy,hz - slope],[hx,hy,hz - slope],[-hx,hy,hz]
-    ].map(([lx, ly, lz]) => xformLocal(lx, ly, lz, R, center, false));
-    const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
-    for (const [i, j] of edges) drawLine3D(corners[i], corners[j], stroke, 1.6, [4, 4], basis);
-  }
 }
 
 function buildConfirmedStructure(tracked) {
@@ -931,16 +835,6 @@ function buildConfirmedStructure(tracked) {
       }
     }
   } else if (tracked.key === 'kantolan_suola_cracker') {
-    // KNOWN ISSUES (details in glove_twin/objects.py above the 'kantolan_suola_cracker' entry):
-    //  - This box is drawn lying down only because its catalog dims are x=195, y=66, z=45 mm. The
-    //    simulators and shape_fit expect z to be the long axis, so 3 tests fail (grasp 'dropped' instead of
-    //    'lifted' x2, fit error 16.6 mm). Better: keep dims upright (z = 195 mm) and lay it down here via
-    //    laidOnSide, with the pose z-centre using the lying height min(ex, ey) / 2.
-    //  - Only this key gets the artwork; any other box falls through to the generic branch below.
-    //  - The top face is an 80 x 28 colour grid (about 4500 triangles); the logo edges are blocky and the
-    //    text ("Kantolan", "SUOLA CRACKER", "150 g") is only suggested by coloured shapes.
-    //  - Removing 'profeel' also removed its Tetra Brik artwork from use: the isCarton / screw-cap code in
-    //    the generic box branch is now only reached by a catalog box with sloped_top_m > 0.
     // Kantolan Suola Cracker 150 g: flow-wrapped cracker box lying on its largest face.
     // Colours from kantolan.fi: golden-orange wrap, red oval logo, teal photo panel with crackers.
     const hx = ex * 0.5, hy = ey * 0.5, hz = ez * 0.5;
@@ -1474,8 +1368,8 @@ function render(nowMs) {
 
   const tracked = resolveTrackedCandidate(state);
   const conf = tracked ? (tracked.confidence || 0) : 0;
-  const isConfirmed90 = Boolean(tracked && (tracked.confirmed_90 || conf > 0.90));
-  const showSolidStructure = Boolean(tracked && (isConfirmed90 || state.phase === 'carrying' || state.phase === 'placed'));
+  const isConfirmed90 = Boolean(tracked && tracked.confirmed_90 && conf > 0.90);
+  const showSolidStructure = Boolean(tracked && isConfirmed90);
   const objIsSeeThrough = objectVisMode === 'see_through';
   const hullIsSeeThrough = hullVisMode === 'see_through';
 
@@ -1509,9 +1403,6 @@ function render(nowMs) {
   // 2b. Render 3D Convex Hull + Predefined 3D Object across all 4 (Visible / See-Through) combinations
   if (!showSolidStructure) {
     drawTriList(hullTris.all);
-    if (tracked) {
-      drawPreviewWireframe(tracked, basis);
-    }
   } else if (!objIsSeeThrough && !hullIsSeeThrough) {
     // Object: Visible + Hull: Visible -> unified 3D depth-sorted solid triangles
     renderConfirmedStructure(tracked, isConfirmed90, false, basis, zT, hullTris.front, null);
@@ -1581,7 +1472,7 @@ function updateSidebar() {
 
   const tracked = resolveTrackedCandidate(state);
   const confPct = tracked ? Math.round((tracked.confidence || 0) * 100) : 0;
-  const isConfirmed90 = Boolean(tracked && (tracked.confirmed_90 || (tracked.confidence || 0) > 0.90));
+  const isConfirmed90 = Boolean(tracked && tracked.confirmed_90 && (tracked.confidence || 0) > 0.90);
 
   const cPill = document.getElementById('confirm-pill');
   if (isConfirmed90 && tracked) {
@@ -1596,10 +1487,17 @@ function updateSidebar() {
   pPill.textContent = 'PHASE: ' + state.phase.toUpperCase();
   pPill.className = 'pill phase-' + state.phase;
 
-  document.getElementById('btn-trace').className = state.gesture?.stream_index ? 'active-toggle' : '';
+  const isCarrying = state.phase === 'carrying';
+  const traceBtn = document.getElementById('btn-trace');
+  traceBtn.disabled = isCarrying;
+  traceBtn.className = (!isCarrying && state.gesture?.stream_index) ? 'active-toggle' : '';
+  document.getElementById('btn-snap').disabled = isCarrying;
+  document.getElementById('btn-caliper').disabled = isCarrying;
   const phaseBtn = document.getElementById('btn-phase');
+  const hasScannedVoxels = (state.cloud?.n_voxels || 0) >= 1;
+  phaseBtn.disabled = state.phase === 'scanning' && !hasScannedVoxels;
   if (state.phase === 'scanning') phaseBtn.textContent = '[Space] Lock Grasp to Pick Up (✌️)';
-  else if (state.phase === 'carrying') phaseBtn.textContent = '[Space] Object Placed -> Run G1 (✌️)';
+  else if (state.phase === 'carrying') phaseBtn.textContent = tracked ? '[Space] Object Placed -> Run G1 (✌️)' : '[Space] Place Scanned Shape (✌️)';
   else phaseBtn.textContent = '[Space] Pick Up & Move Again (✌️)';
 
   document.getElementById('m-pts').textContent = state.cloud.n_voxels;

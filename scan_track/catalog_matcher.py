@@ -5,7 +5,7 @@ Bridges the missing-weight gap on force-less mocap gloves:
   `material`, `grasp`) -> Schema-validated `glove_twin` Object Card (`v1`).
 
 Supports both:
-  1. The default repo catalog (`glove_twin.objects.OBJECTS`: `redbull`, `profeel`, `wood_sphere`)
+  1. The default repo catalog (`glove_twin.objects.OBJECTS`: `redbull`, `kantolan_suola_cracker`, `wood_sphere`)
   2. Custom JSON catalog additions (`load_custom_catalog`) so teams can add any table object
      on-site with calipers + a kitchen scale in 30 seconds.
 """
@@ -76,16 +76,24 @@ def match_scan_to_catalog(
 ) -> CatalogMatchResult:
     """Compute posterior match probabilities across `catalog` from metric 3D geometry."""
     cat = OBJECTS if catalog is None else catalog
-    if scan.n_voxels < min_voxels:
-        n = max(len(cat), 1)
+    if not cat:
         return CatalogMatchResult(
             best_key=None,
             confident=False,
-            probabilities={k: round(1.0 / n, 3) for k in cat},
+            probabilities={},
+            scores_detail={},
+            advice="Catalog is empty.",
+        )
+    if scan.n_voxels < 4:
+        return CatalogMatchResult(
+            best_key=None,
+            confident=False,
+            probabilities={k: 0.0 for k in cat},
             scores_detail={},
             advice=f"Keep scanning ({scan.n_voxels}/{min_voxels} voxels): trace top, sides, and base seam.",
         )
 
+    prim_best = scan.primitive_fit.get("best")
     prim_weights = scan.primitive_fit.get("weights", {})
     prim_fits = scan.primitive_fit.get("fits", {})
 
@@ -95,6 +103,7 @@ def match_scan_to_catalog(
     W_meas = scan.width_m
 
     log_scores: dict[str, float] = {}
+    cal_d2_map: dict[str, float] = {}
     details: dict[str, dict[str, float]] = {}
 
     for key, ref in cat.items():
@@ -108,20 +117,23 @@ def match_scan_to_catalog(
         if t_fit is not None:
             td = t_fit["dims_m"]
             if ref.shape == "sphere":
-                L_eff = W_eff = H_eff = 2.0 * td["radius"]
+                d_fit = 2.0 * td["radius"]
+                L_eff = W_eff = d_fit
+                H_eff = max(H_meas, 0.65 * d_fit + 0.35 * H_meas)
             elif ref.shape == "cylinder":
-                L_eff = W_eff = 2.0 * td["radius"]
-                H_eff = 0.65 * td["height"] + 0.35 * H_meas
+                d_fit = 2.0 * td["radius"]
+                L_eff = W_eff = d_fit
+                H_eff = max(H_meas, 0.65 * td["height"] + 0.35 * H_meas)
             else:
                 L_eff, W_eff = sorted([td["width"], td["depth"]], reverse=True)
-                H_eff = 0.65 * td["height"] + 0.35 * H_meas
+                H_eff = max(H_meas, 0.65 * td["height"] + 0.35 * H_meas)
         else:
             L_eff, W_eff, H_eff = L_meas, W_meas, H_meas
 
-        # Normalized squared residuals (metric tolerances ~9-11 mm)
-        err_h = ((H_eff - H_ref) / 0.011) ** 2
-        err_l = ((L_eff - L_ref) / 0.011) ** 2
-        err_w = ((W_eff - W_ref) / 0.011) ** 2
+        # Normalized squared residuals (11 mm floor or 8% of reference extent for long boxes)
+        err_h = ((H_eff - H_ref) / max(0.011, 0.08 * H_ref)) ** 2
+        err_l = ((L_eff - L_ref) / max(0.011, 0.08 * L_ref)) ** 2
+        err_w = ((W_eff - W_ref) / max(0.011, 0.08 * W_ref)) ** 2
 
         # Hull volume term (a partial scan hull typically captures ~80-100% of true volume)
         err_v = 0.0
@@ -135,14 +147,19 @@ def match_scan_to_catalog(
             ref_dims = np.array([L_ref, W_ref, H_ref])
             for c_val in scan.calipers_m:
                 best_d = float(np.min(np.abs(ref_dims - c_val)))
-                err_cal += (best_d / 0.007) ** 2
+                err_cal += min((best_d / 0.007) ** 2, 12.0)
 
-        # Shape-class BIC weight term (separates Red Bull cylinder from similar-size PROfeel box!)
-        p_shape = max(float(prim_weights.get(ref.shape, 0.15)), 0.02)
-        shape_nll = -2.2 * math.log(p_shape)
+        # Shape-class BIC weight term (separates box, cylinder, and sphere primitives once >=7 voxels exist)
+        if prim_best is not None:
+            p_shape = max(float(prim_weights.get(ref.shape, 0.0)), 0.02)
+            shape_nll = -2.2 * math.log(p_shape)
+        else:
+            p_shape = 0.0
+            shape_nll = 0.0
 
         total_d2 = err_h + err_l + err_w + 0.6 * err_v + err_cal + shape_nll
         log_scores[key] = -0.5 * total_d2
+        cal_d2_map[key] = err_cal
         details[key] = {
             "H_mm": round(H_eff * 1000.0, 1),
             "L_mm": round(L_eff * 1000.0, 1),
@@ -154,16 +171,44 @@ def match_scan_to_catalog(
             "distance_sq": round(total_d2, 2),
         }
 
-    mx = max(log_scores.values())
-    exps = {k: math.exp(v - mx) for k, v in log_scores.items()}
-    s = sum(exps.values())
-    probs = {k: round(v / s, 4) for k, v in exps.items()}
-    ranked = sorted(probs, key=probs.get, reverse=True)
-    best_k = ranked[0]
-    confident = probs[best_k] >= confidence_threshold and scan.n_voxels >= 14
+    if not log_scores:
+        return CatalogMatchResult(
+            best_key=None,
+            confident=False,
+            probabilities={},
+            scores_detail={},
+            advice="Catalog is empty.",
+        )
 
-    if confident:
+    # Open-set unknown/unmatched baseline (~60 mm 3D geometric mismatch) prevents forced matches on non-catalog shapes
+    null_log = -0.5 * (34.0 + min(cal_d2_map.values()))
+    mx = max(max(log_scores.values()), null_log)
+    exps = {k: math.exp(v - mx) for k, v in log_scores.items()}
+    exp_null = math.exp(null_log - mx)
+    s = sum(exps.values()) + exp_null
+
+    if scan.n_voxels < min_voxels:
+        evidence_scale = (scan.n_voxels - 3) / float(max(min_voxels - 3, 1))
+        probs = {k: round((v / s) * evidence_scale, 4) for k, v in exps.items()}
+        return CatalogMatchResult(
+            best_key=None,
+            confident=False,
+            probabilities=probs,
+            scores_detail=details,
+            advice=f"Keep scanning ({scan.n_voxels}/{min_voxels} voxels): trace top, sides, and base seam.",
+        )
+
+    probs = {k: round(v / s, 4) for k, v in exps.items()}
+    p_null = exp_null / s
+    ranked = sorted(probs, key=probs.get, reverse=True)
+    top_k = ranked[0]
+    best_k: str | None = top_k if probs[top_k] >= p_null else None
+    confident = bool(best_k is not None and probs[best_k] >= confidence_threshold and scan.n_voxels >= 14)
+
+    if confident and best_k is not None:
         advice = f"Matched {cat[best_k].label} ({probs[best_k] * 100:.0f}%). Ready to grab & relocate!"
+    elif best_k is None:
+        advice = "No catalog match yet — keep scanning surfaces to capture full shape."
     elif len(ranked) >= 2:
         a, b = cat[ranked[0]], cat[ranked[1]]
         if a.shape != b.shape and {a.shape, b.shape} == {"box", "cylinder"}:

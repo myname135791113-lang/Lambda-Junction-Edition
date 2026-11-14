@@ -130,10 +130,8 @@ From the accumulated point cloud $\mathcal{P}$ and Convex Hull $\mathcal{H}$:
    with $\sigma_H \approx 8\text{ mm}$, $\sigma_{L,W} \approx 10\text{ mm}$, $\sigma_V \approx 0.25 V_c$, and $P(c \mid \mathcal{P}) = \text{softmax}\!\left(-\tfrac{1}{2} d^2(c)\right)$.
 3. **Output:** Once top probability $\ge 0.85$ (and $N \ge 15$ distinct voxels), lock the matched `RefObject` and emit a validated `v1` **Object Card** (`glove_twin/object_card.py`) populated with the catalog's known `mass_kg`, `friction`, `max_grip_n`, `material`, and planned `grasp`.
 
-> **Important Catalog Separation Note (`glove_twin/objects.py`):**
-> Currently `redbull` (cylinder, Ø53 × 133 mm) and `profeel` (box, 47.8 × 47.5 × 140 mm) differ by only **~5 mm in width** and **7 mm in height**.
-> - To separate those two reliably, the user should trace across a **flat face + sharp vertical edge** (or grasp at 45° across corners) so the box-vs-cylinder BIC term separates them.
-> - **Recommended for live demo reliability:** Add or swap catalog items so each demo object differs by **$\ge 20\text{ mm}$** in at least one dimension (e.g., slim Red Bull can Ø53×133 mm vs. wider mug/jar Ø85×95 mm vs. flat rectangular box 120×80×60 mm vs. wooden sphere Ø100 mm).
+> **Catalog Separation Note (`glove_twin/objects.py`):**
+> The three catalog objects — `redbull` (upright cylinder, Ø53 × 133 mm), `kantolan_suola_cracker` (flat box lying down, 195 × 66 × 45 mm), and `wood_sphere` (sphere, Ø100 mm) — are separated by **> 20 mm** in height and footprint, plus distinct `cylinder` / `box` / `sphere` BIC weights.
 
 ### 4.4 Relocation Pose Tracking (Pick Up & Place Anywhere on Table)
 Let $T_{\text{world}\leftarrow\text{obj}}(t_0)$ be the scanned object's initial table pose (centroid $(\bar{x}, \bar{y}, z_{\text{table}} + H/2)$ and footprint yaw $\theta_0$).
@@ -162,7 +160,7 @@ Before writing new code, note what already exists across branches of `Lambda-Jun
 | Branch & File | What Already Exists | How to Reuse It |
 |---|---|---|
 | `origin/touchmap-grasp` → `touchmap/touchmap_grasp.py` | Rokoko Studio UDP v4 receiver (port `14043`, LZ4 decompression, Y-up m → Z-up mm conversion), Cauchy-loss `box`/`cylinder`/`sphere` fitter, BIC scoring, live **Rerun** 3D viewer, `.ply` export | Cherry-pick/port the Rokoko UDP receiver + Rerun hooks + 3D Cauchy primitive fitter directly; extend from 1-hand fingertips to **both hands + wrist 6-DoF + palmar skin offset**. |
-| `origin/testing` → `glove_twin/objects.py` | `RefObject` dataclass & `OBJECTS` catalog (`redbull`, `profeel`, `wood_sphere`) with dimensions, `mass_kg`, `friction`, `max_grip_n`, `material`, `volume_m3` | Use directly as the **Known Object Catalog** (and add 2–3 well-separated demo objects measured with calipers + kitchen scale). |
+| `origin/testing` → `glove_twin/objects.py` | `RefObject` dataclass & `OBJECTS` catalog (`redbull`, `kantolan_suola_cracker`, `wood_sphere`) with dimensions, `mass_kg`, `friction`, `max_grip_n`, `material`, `volume_m3` | Use directly as the **Known Object Catalog** (and add 2–3 well-separated demo objects measured with calipers + kitchen scale). |
 | `origin/testing` → `glove_twin/object_card.py` | `build_card()`, `validate_card()`, `choose_grasp()`, JSON schema `v1` | Emit this exact `*.card.json` format (plus a `pose_robot_frame` block with `x, y, z, yaw_rad`) after catalog match + placement! |
 | `origin/testing` → `glove_twin/touch.py` | MuJoCo kinematic Rokoko hand model + palmar pad normal/offset math (`pad_contacts`) | Reuse palmar normal offset concept (or compute directly from Rokoko proximal→distal bone vectors in wrist/world frame). |
 | `origin/testing` → `glove_twin/robot_sim.py` & `robot_hand.py` | Parallel-jaw & multi-finger MuJoCo grasp simulation with planned grip force & drop/crush verification | Spawn the matched catalog object at its tracked `(x, y, z_table, yaw)` in MuJoCo to verify the grasp before sending waypoints to the real robot arm. |

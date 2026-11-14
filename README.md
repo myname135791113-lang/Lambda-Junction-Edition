@@ -32,7 +32,7 @@ python -m unittest discover -s tests -v                        # all tests
 | Object | Shape and size | Mass | Sources |
 |---|---|---|---|
 | Red Bull 250 ml can, full | cylinder, Ø 53 mm, H 133 mm | ≈ 270 g (estimate: 250 ml × 1.04 g/ml + ~10 g can; weigh it) | [Crown 250 ml slim](https://crowncork.com/beverage-packaging/products/beverage-cans/83oz-250ml-slim), [Ball design guide](https://printguides.ball.com/whats-available/Europe), [redbull.com](https://www.redbull.com/int-en/energydrink/red-bull-energy-drink) |
-| Valio PROfeel 250 ml carton, full | box, 47.8 × 47.5 × 140 mm, sloped "Edge" top | 265.8 g | [Prisma.fi listing](https://www.prisma.fi/tuotteet/111163612/valio-profeel-proteiinijuoma-salted-caramel-250-ml-uht-laktoositon-111163612), [Valio + Tetra Brik Aseptic Edge](https://www.packaginginsights.com/news/valio-revitalises-dairy-products-with-tetra-brik-aseptic-edge.html) |
+| Kantolan Suola Cracker 150 g box (lying down) | box, 195 × 66 × 45 mm | 153 g | [Kantolan Suola Cracker](https://www.kantolan.fi/tuotteet/kantolan-150g-suola-cracker/), [Tokmanni.fi listing](https://www.tokmanni.fi/suolakeksi-kantolan-150-g-suola-cracker-6410380032791) |
 | Wooden sphere | sphere, r = 50 mm (V = 523.6 cm³) | ≈ 323 g: average of beech, paper birch and red pine | [USDA Wood Handbook, ch. 5](https://research.fs.usda.gov/treesearch/37427) (SG at 12 % moisture × 1.12) |
 
 All values live in `glove_twin/objects.py`. The mapping pipeline never reads them; they are only used
@@ -68,8 +68,7 @@ Ten sessions per object, each with a new hand size (±2 %), 1° joint noise and 
 **30/30 shapes correct**.
 
 - **Can:** radius within 5.6 mm, height within 10.3 mm.
-- **Carton:** width and depth within 5 mm. One session's height pinch couldn't be done at that hand
-  size, and was flagged rather than guessed.
+- **Cracker box:** width and depth within 5 mm; the 195 mm length exceeds single-hand thumb-index pinch span (~169 mm), so it is flagged as unmeasured rather than guessed.
 - **Sphere:** within 2 mm.
 
 The simulator's hand closes kinematically. The real glove has to confirm these numbers.
@@ -83,7 +82,7 @@ The simulator's hand closes kinematically. The real glove has to confirm these n
 
 `robot_hand.py` grasps the real object with a multi-finger robot hand (Rokoko geometry, torque-driven
 fingers, force-regulated squeeze). With the card's force it lifts all three objects. At 0.3× it drops
-them, and above the safe limit it crushes the can and the carton.
+them, and above the safe limit it crushes the can and the cracker box.
 
 ### Real hardware
 

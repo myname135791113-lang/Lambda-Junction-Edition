@@ -253,13 +253,14 @@ class Explorer:
                     self.data.qpos[self.qadr[j]] = max(lo, self.data.qpos[self.qadr[j]] - 0.05)
                 mujoco.mj_kinematics(self.model, self.data)
 
-    def enclosure(self, u: np.ndarray, axis: np.ndarray, z_off: float, preshape: dict) -> None:
+    def enclosure(self, u: np.ndarray, axis: np.ndarray, z_off: float | np.ndarray, preshape: dict) -> None:
         z_h = u / np.linalg.norm(u)                           # dorsal side away from the object
         y_h = axis - (axis @ z_h) * z_h
         y_h /= np.linalg.norm(y_h)
         x_h = np.cross(y_h, z_h)
         R = np.column_stack([x_h, y_h, z_h])
-        self.place_palm(R, np.array([0, 0, z_off]), z_h, preshape)
+        center = np.asarray(z_off, float) if np.ndim(z_off) > 0 else np.array([0.0, 0.0, float(z_off)])
+        self.place_palm(R, center, z_h, preshape)
         for chain in ("index", "middle", "ring", "little", "thumb"):
             self.close_chain(FLEX_CHAINS[chain])
 
@@ -387,10 +388,17 @@ class Session:
     def side_enclosure(self, az: float) -> None:
         """Palm on the side, fingers wrapping around the long axis."""
         obj, rng = self.obj, self.rng
+        if obj.shape == "box":                                # palm flat on a side face along the long axis
+            ext = obj.extents()
+            long_ax = int(np.argmax(ext))
+            long_vec = np.eye(3)[long_ax]
+            c0, c1 = [np.eye(3)[i] for i in range(3) if i != long_ax]
+            u = np.sign(np.cos(az)) * c0 if abs(np.cos(az)) > abs(np.sin(az)) else np.sign(np.sin(az)) * c1
+            center = rng.uniform(-0.25, 0.25) * ext[long_ax] * long_vec
+            self.ex.enclosure(u, long_vec * rng.choice([-1, 1]), center, self.pre)
+            self._snap("enclosure")
+            return
         u = np.array([np.cos(az), np.sin(az), 0.0])
-        if obj.shape == "box":                                # palm flat on a side face
-            u = (np.array([np.sign(np.cos(az)), 0, 0]) if abs(np.cos(az)) > abs(np.sin(az))
-                 else np.array([0, np.sign(np.sin(az)), 0]))
         if obj.shape == "sphere":
             u = u + np.array([0, 0, rng.uniform(-0.4, 0.4)])
         z_off = 0.0 if obj.shape == "sphere" else rng.uniform(-0.25, 0.25) * obj.extents()[2]
@@ -399,7 +407,13 @@ class Session:
 
     def top_grasp(self) -> None:
         az = self.rng.uniform(0, 2 * np.pi)
-        self.ex.enclosure(np.array([0, 0, 1.0]), np.array([np.cos(az), np.sin(az), 0]), 0.0, self.pre)
+        if self.obj.shape == "box":
+            long_ax = int(np.argmax(self.obj.extents()))
+            u_cap = np.eye(3)[long_ax]
+            c0, c1 = [np.eye(3)[i] for i in range(3) if i != long_ax]
+            self.ex.enclosure(u_cap, np.cos(az) * c0 + np.sin(az) * c1, 0.0, self.pre)
+        else:
+            self.ex.enclosure(np.array([0, 0, 1.0]), np.array([np.cos(az), np.sin(az), 0]), 0.0, self.pre)
         self._snap("top")
 
     def pinch(self, e: np.ndarray, attempts: int = 3) -> bool:
@@ -421,9 +435,11 @@ class Session:
             self.pinch(e)
 
     def follow_up(self, reasons: list[str]) -> None:
-        """'Touch a few more spots': one more enclosure, then pinches (height first if missing)."""
+        """'Touch a few more spots': one more enclosure, then pinches (long axis first if missing)."""
         self.side_enclosure(self.rng.uniform(0, 2 * np.pi))
-        axes = [np.array([0, 0, 1.0])] if any("height" in r or "along z" in r for r in reasons) else []
+        long_ax = int(np.argmax(self.obj.extents())) if self.obj.shape == "box" else 2
+        ax_name = "xyz"[long_ax]
+        axes = [np.eye(3)[long_ax]] if any("height" in r or f"along {ax_name}" in r for r in reasons) else []
         for e in axes + list(np.eye(3)):
             self.pinch(e)
 

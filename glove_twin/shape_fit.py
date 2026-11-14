@@ -433,8 +433,14 @@ def fit_shape(grasps: list[Grasp], models=("box", "cylinder", "sphere")) -> Shap
         ext = np.ptp(fit.points_obj[:, k])
         theta[k] = min(max(theta[k], ext), theta[k] + 0.015)
         names = ["x", "y", "z"]
-        for ax in range(3):  # each extent needs both opposite faces touched, or a pinch across it
-            both = coverage[f"+{names[ax]}"] > 0 and coverage[f"-{names[ax]}"] > 0
+        dom_ax = np.argmax(np.abs(fit.normals_obj), axis=1)
+        dom_sgn = np.sign(fit.normals_obj[np.arange(len(fit.normals_obj)), dom_ax])
+        for ax in range(3):  # each extent needs opposite faces touched in the same grasp, or a pinch across it
+            both = any(
+                np.any((fit.grasp_index == gid) & (dom_ax == ax) & (dom_sgn > 0))
+                and np.any((fit.grasp_index == gid) & (dom_ax == ax) & (dom_sgn < 0))
+                for gid in range(len(grasps))
+            )
             pinched = any(abs(d - theta[ax]) < 0.15 * theta[ax] for d in cal)
             if not (both or pinched):
                 reasons.append(f"extent along {names[ax]} not measured: pinch across it")
@@ -485,7 +491,8 @@ def _sample_surface(shape: str, dims: np.ndarray, rng, n: int, region: str, cent
                 nrm.append([np.cos(ang), np.sin(ang), 0])
         else:
             half = dims / 2
-            faces = [0, 1] if region == "side" else [2]
+            long_ax = int(np.argmax(dims))
+            faces = [i for i in range(3) if i != long_ax] if region == "side" else [long_ax]
             ax = faces[rng.integers(len(faces))] if region != "any" else rng.integers(3)
             s = rng.choice([-1, 1])
             p = rng.uniform(-half * 0.85, half * 0.85)

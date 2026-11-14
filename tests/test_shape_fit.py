@@ -1,5 +1,9 @@
 """Shape fitting on synthetic touch sessions (no MuJoCo): fast checks of the math."""
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
@@ -34,7 +38,7 @@ class FitAccuracyTests(unittest.TestCase):
     """
 
     def test_model_objects(self):
-        for key in ("redbull", "profeel", "wood_sphere"):
+        for key in ("redbull", "kantolan_suola_cracker", "wood_sphere"):
             o = OBJECTS[key]
             dims = o.extents() if o.shape == "box" else o.dims_vector()
             hits, worst = 0, 0.0
