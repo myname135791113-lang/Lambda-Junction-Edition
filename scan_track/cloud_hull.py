@@ -248,6 +248,16 @@ def _sdf_table_primitive(
         dz = np.abs(P[:, 2] - (z_table + 0.5 * H)) - 0.5 * H
         return np.minimum(np.maximum(dr, dz), 0.0) + np.hypot(np.maximum(dr, 0.0), np.maximum(dz, 0.0))
 
+    if shape == "cylinder_side":
+        # params = [cx, cy, yaw, R, L], horizontal cylinder resting on z_table -> cz = z_table + R
+        cx, cy, yaw, R, L = params
+        cyaw, syaw = math.cos(yaw), math.sin(yaw)
+        dx, dy = P[:, 0] - cx, P[:, 1] - cy
+        u = np.abs(cyaw * dx + syaw * dy) - 0.5 * L
+        v = -syaw * dx + cyaw * dy
+        dr = np.hypot(v, P[:, 2] - (z_table + R)) - R
+        return np.minimum(np.maximum(dr, u), 0.0) + np.hypot(np.maximum(dr, 0.0), np.maximum(u, 0.0))
+
     # box: params = [cx, cy, yaw, L, W, H], resting flat on z_table -> cz = z_table + H/2
     cx, cy, yaw, L, W, H = params
     cyaw, syaw = math.cos(yaw), math.sin(yaw)
@@ -285,7 +295,7 @@ def _fit_single_primitive_irls(
 
             J = np.empty((len(P), k), dtype=float)
             for j in range(k):
-                step = eps if j != 2 or shape != "box" else 1e-4
+                step = 1e-4 if (j == 2 and shape in ("box", "cylinder_side")) else eps
                 xp = x.copy()
                 xp[j] += step
                 J[:, j] = (_sdf_table_primitive(shape, xp, P, z_table) - r) / step
@@ -357,8 +367,8 @@ def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> 
     fits["sphere"]["center_xy"] = [float(sp[0]), float(sp[1])]
     fits["sphere"]["yaw_rad"] = 0.0
 
-    # 2. Upright Cylinder: [cx, cy, R, H]
-    fits["cylinder"] = _fit_single_primitive_irls(
+    # 2. Cylinder: Upright [cx, cy, R, H] OR Sideways [cx, cy, yaw, R, L] resting on z_table
+    cyl_up = _fit_single_primitive_irls(
         "cylinder",
         [np.array([cx, cy, R_est, H_obs]), np.array([cx, cy, 0.5 * L_obs, H_obs])],
         np.array([-2.0, -2.0, 0.010, 0.015]),
@@ -366,10 +376,18 @@ def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> 
         P,
         z_table,
     )
-    cp = fits["cylinder"]["params"]
-    fits["cylinder"]["dims_m"] = {"radius": float(cp[2]), "height": float(cp[3])}
-    fits["cylinder"]["center_xy"] = [float(cp[0]), float(cp[1])]
-    fits["cylinder"]["yaw_rad"] = 0.0
+    R_side_est = max(0.25 * (W_obs + H_obs), 0.012)
+    cyl_side = _fit_single_primitive_irls(
+        "cylinder_side",
+        [
+            np.array([cx, cy, yaw0, R_side_est, L_obs]),
+            np.array([cx, cy, yaw0 + 0.5 * math.pi, 0.5 * H_obs, max(L_obs, W_obs)]),
+        ],
+        np.array([-2.0, -2.0, -math.pi, 0.010, 0.015]),
+        np.array([2.0, 2.0, math.pi, 0.25, 0.45]),
+        P,
+        z_table,
+    )
 
     # 3. Upright Box: [cx, cy, yaw, L, W, H]
     fits["box"] = _fit_single_primitive_irls(
@@ -390,12 +408,38 @@ def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> 
     fits["box"]["yaw_rad"] = float(bp[2])
 
     # Adaptive MAD noise floor prevents overconfident wrong labels when real-sensor jitter > 3.5 mm
-    sigma_eff = max(SIGMA_FIT_M, 1.4826 * min(fits[m]["median_abs_m"] for m in ("box", "cylinder", "sphere")))
+    med_candidates = [fits["box"]["median_abs_m"], fits["sphere"]["median_abs_m"], cyl_up["median_abs_m"], cyl_side["median_abs_m"]]
+    sigma_eff = max(SIGMA_FIT_M, 1.4826 * min(med_candidates))
     n_pts = max(len(P), 7)
+
+    for c_fit in (cyl_up, cyl_side):
+        z_sc = c_fit["residuals"] / sigma_eff
+        c_fit["bic"] = float(np.sum(np.log1p(z_sc * z_sc))) + c_fit["k"] * math.log(n_pts)
+
+    cp_s = cyl_side["params"]
+    use_sideways_cyl = bool(
+        cyl_side["bic"] < cyl_up["bic"] and float(cp_s[4]) > 1.25 * (2.0 * float(cp_s[3]))
+    )
+    if use_sideways_cyl:
+        fits["cylinder"] = cyl_side
+        fits["cylinder"]["shape"] = "cylinder"
+        fits["cylinder"]["dims_m"] = {"radius": float(cp_s[3]), "height": float(cp_s[4])}
+        fits["cylinder"]["center_xy"] = [float(cp_s[0]), float(cp_s[1])]
+        fits["cylinder"]["yaw_rad"] = float(cp_s[2])
+        fits["cylinder"]["sideways"] = True
+    else:
+        fits["cylinder"] = cyl_up
+        cp = cyl_up["params"]
+        fits["cylinder"]["dims_m"] = {"radius": float(cp[2]), "height": float(cp[3])}
+        fits["cylinder"]["center_xy"] = [float(cp[0]), float(cp[1])]
+        fits["cylinder"]["yaw_rad"] = 0.0
+        fits["cylinder"]["sideways"] = False
+
     for m in ("box", "cylinder", "sphere"):
-        z_scaled = fits[m]["residuals"] / sigma_eff
-        fits[m]["bic"] = float(np.sum(np.log1p(z_scaled * z_scaled))) + fits[m]["k"] * math.log(n_pts)
-        del fits[m]["residuals"]
+        if "residuals" in fits[m]:
+            z_scaled = fits[m]["residuals"] / sigma_eff
+            fits[m]["bic"] = float(np.sum(np.log1p(z_scaled * z_scaled))) + fits[m]["k"] * math.log(n_pts)
+            del fits[m]["residuals"]
 
     bics = np.array([fits[m]["bic"] for m in ("box", "cylinder", "sphere")])
     w = np.exp(-0.5 * (bics - bics.min()))
@@ -437,6 +481,13 @@ def fit_reference_pose_xy_yaw(
                 P,
                 z_table,
             )
+        if shape == "cylinder_side":
+            return _sdf_table_primitive(
+                "cylinder_side",
+                np.array([st[0], st[1], st[2], float(dims["radius"]), float(dims["height"])]),
+                P,
+                z_table,
+            )
         return _sdf_table_primitive(
             "box",
             np.array([st[0], st[1], st[2], float(dims["x"]), float(dims["y"]), float(dims["z"])]),
@@ -444,13 +495,13 @@ def fit_reference_pose_xy_yaw(
             z_table,
         )
 
-    is_box = shape == "box"
-    k = 3 if is_box else 2
+    has_yaw = shape in ("box", "cylinder_side")
+    k = 3 if has_yaw else 2
     lo = np.array([med_xy[0] - 0.12, med_xy[1] - 0.12, -math.pi])[:k]
     hi = np.array([med_xy[0] + 0.12, med_xy[1] + 0.12, math.pi])[:k]
 
     seeds: list[np.ndarray] = []
-    if is_box:
+    if has_yaw:
         seeds.append(np.array([med_xy[0], med_xy[1], base_yaw]))
         seeds.append(np.array([base_xy[0], base_xy[1], base_yaw]))
         seeds.append(np.array([med_xy[0], med_xy[1], base_yaw + 0.25 * math.pi]))
@@ -475,7 +526,7 @@ def fit_reference_pose_xy_yaw(
 
             J = np.empty((len(P), k), dtype=float)
             for j in range(k):
-                step = 1e-4 if (is_box and j == 2) else eps
+                step = 1e-4 if (has_yaw and j == 2) else eps
                 stp = st.copy()
                 stp[j] += step
                 J[:, j] = (eval_sdf(stp) - r) / step
@@ -489,7 +540,7 @@ def fit_reference_pose_xy_yaw(
                 break
 
             st_new = np.clip(st + dx, lo, hi)
-            if is_box:
+            if has_yaw:
                 st_new[2] = math.atan2(math.sin(st_new[2]), math.cos(st_new[2]))
             r_new = eval_sdf(st_new)
             dev_new = float(np.sum(np.log1p((r_new / sigma) ** 2)))
@@ -509,7 +560,7 @@ def fit_reference_pose_xy_yaw(
             best_dev = dev_fin
             best_st = st.copy()
 
-    yaw_out = math.atan2(math.sin(best_st[2]), math.cos(best_st[2])) if is_box else base_yaw
+    yaw_out = math.atan2(math.sin(best_st[2]), math.cos(best_st[2])) if has_yaw else base_yaw
     return best_st[:2].copy(), float(yaw_out)
 
 
@@ -616,6 +667,48 @@ class TactileCloudBuilder:
         for pt, cnt in self._voxels.values():
             p_new = pt.copy()
             p_new[:2] = dst + R2 @ (pt[:2] - src)
+            key = tuple(int(math.floor(coord / self.voxel_m)) for coord in p_new)
+            if key in new_voxels:
+                prev_pt, prev_cnt = new_voxels[key]
+                tot = prev_cnt + cnt
+                new_voxels[key] = ((prev_pt * prev_cnt + p_new * cnt) / tot, tot)
+            else:
+                new_voxels[key] = (p_new, cnt)
+
+        self._voxels = new_voxels
+        self._dirty = True
+        self._cached_summary = None
+
+    def transform_se3(
+        self,
+        T_src: np.ndarray,
+        T_dst: np.ndarray,
+        *,
+        snap_min_z_to_table: bool = False,
+    ) -> None:
+        """Rigidly relocate accumulated 3D cloud in full SE(3) from `T_src` to `T_dst`."""
+        if not self._voxels:
+            return
+        R_src, t_src = T_src[:3, :3], T_src[:3, 3]
+        R_dst, t_dst = T_dst[:3, :3], T_dst[:3, 3]
+        R_rel = R_dst @ R_src.T
+
+        transformed: list[tuple[np.ndarray, int]] = []
+        for pt, cnt in self._voxels.values():
+            p_new = R_rel @ (pt - t_src) + t_dst
+            transformed.append((p_new, cnt))
+
+        if snap_min_z_to_table and transformed:
+            min_z = min(float(p[2]) for p, _ in transformed)
+            dz = self.z_table - min_z
+            for p, _ in transformed:
+                p[2] += dz
+
+        new_voxels: dict[tuple[int, int, int], tuple[np.ndarray, int]] = {}
+        for p_new, cnt in transformed:
+            if p_new[2] < self.z_table:
+                p_new = p_new.copy()
+                p_new[2] = self.z_table
             key = tuple(int(math.floor(coord / self.voxel_m)) for coord in p_new)
             if key in new_voxels:
                 prev_pt, prev_cnt = new_voxels[key]

@@ -51,6 +51,89 @@ def upright_se3(xy: np.ndarray, z_center: float, yaw_rad: float) -> np.ndarray:
     return make_se3(R, np.array([float(xy[0]), float(xy[1]), float(z_center)]))
 
 
+def _orthonormalize_so3(R: np.ndarray) -> np.ndarray:
+    u, _, vt = np.linalg.svd(np.asarray(R, dtype=float))
+    out = u @ vt
+    if np.linalg.det(out) < 0.0:
+        u[:, -1] *= -1.0
+        out = u @ vt
+    return out
+
+
+def _minimal_rot_a_to_b(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return exact SO(3) matrix rotating unit vector `a` onto unit vector `b` along the shortest arc."""
+    ua = np.asarray(a, dtype=float)
+    ub = np.asarray(b, dtype=float)
+    na = float(np.linalg.norm(ua))
+    nb = float(np.linalg.norm(ub))
+    if na < 1e-12 or nb < 1e-12:
+        return np.eye(3, dtype=float)
+    ua = ua / na
+    ub = ub / nb
+    c = float(np.clip(np.dot(ua, ub), -1.0, 1.0))
+    if c > 1.0 - 1e-9:
+        return np.eye(3, dtype=float)
+    if c < -1.0 + 1e-9:
+        ortho = np.array([1.0, 0.0, 0.0]) if abs(ua[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        axis = np.cross(ua, ortho)
+        axis /= float(np.linalg.norm(axis))
+        return 2.0 * np.outer(axis, axis) - np.eye(3, dtype=float)
+    v = np.cross(ua, ub)
+    vx = np.array(
+        [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]],
+        dtype=float,
+    )
+    return np.eye(3, dtype=float) + vx + (vx @ vx) / (1.0 + c)
+
+
+def snap_rotation_to_table(
+    R_raw: np.ndarray,
+    ref_obj: RefObject | None,
+    fallback_height_m: float = 0.10,
+) -> tuple[np.ndarray, float, float, bool]:
+    """Snap pitch/roll flush to `z = z_table` while preserving sideways/flipped 3D resting orientation."""
+    R0 = _orthonormalize_so3(R_raw)
+
+    if ref_obj is not None and ref_obj.shape == "sphere":
+        h_rest = float(ref_obj.extents()[2])
+        yaw = float(math.atan2(R0[1, 0], R0[0, 0]))
+        return R0, h_rest, yaw, True
+
+    if ref_obj is not None and ref_obj.shape == "cylinder":
+        ext = ref_obj.extents()  # [2R, 2R, H]
+        ez_w = R0[:, 2]
+        if abs(float(ez_w[2])) >= math.cos(math.radians(55.0)):
+            s_up = 1.0 if ez_w[2] >= 0.0 else -1.0
+            R_snap = _orthonormalize_so3(_minimal_rot_a_to_b(ez_w, np.array([0.0, 0.0, s_up])) @ R0)
+            yaw = float(math.atan2(R_snap[1, 0], R_snap[0, 0]))
+            return R_snap, float(ext[2]), yaw, bool(s_up > 0.0)
+        horiz = np.array([ez_w[0], ez_w[1], 0.0], dtype=float)
+        hn = float(np.linalg.norm(horiz))
+        axis_xy = horiz / hn if hn > 1e-6 else np.array([1.0, 0.0, 0.0], dtype=float)
+        R_snap = _orthonormalize_so3(_minimal_rot_a_to_b(ez_w, axis_xy) @ R0)
+        yaw = float(math.atan2(axis_xy[1], axis_xy[0]))
+        return R_snap, float(ext[0]), yaw, False
+
+    # Box or unmatched 3D cloud: snap nearest local signed axis onto +Z_world
+    k_up = int(np.argmax(np.abs(R0[2, :])))
+    s_up = 1.0 if R0[2, k_up] >= 0.0 else -1.0
+    R_snap = _orthonormalize_so3(_minimal_rot_a_to_b(s_up * R0[:, k_up], np.array([0.0, 0.0, 1.0])) @ R0)
+    upright = bool(k_up == 2 and s_up > 0.0)
+
+    if ref_obj is not None:
+        ext = ref_obj.extents()
+        h_rest = float(ext[k_up])
+        horiz_axes = [j for j in range(3) if j != k_up]
+        j_long = max(horiz_axes, key=lambda j: float(ext[j]))
+        yaw = float(math.atan2(R_snap[1, j_long], R_snap[0, j_long]))
+    else:
+        h_rest = max(float(fallback_height_m), 0.01)
+        j_h = 0 if k_up != 0 else 1
+        yaw = float(math.atan2(R_snap[1, j_h], R_snap[0, j_h]))
+
+    return R_snap, h_rest, yaw, upright
+
+
 @dataclass
 class ObjectPoseEstimate:
     phase: str                       # "scanning" | "carrying" | "placed"
@@ -68,6 +151,7 @@ class ObjectPoseEstimate:
             "y_m": round(float(self.position_m[1]), 4),
             "z_center_m": round(float(self.position_m[2]), 4),
             "z_bottom_m": round(float(self.position_m[2] - 0.5 * self.resting_height_m), 4),
+            "resting_height_m": round(float(self.resting_height_m), 4),
             "yaw_rad": round(float(self.yaw_rad), 4),
             "yaw_deg": round(float(math.degrees(self.yaw_rad)), 1),
             "upright": self.upright,
@@ -94,20 +178,35 @@ class RelocationTracker:
         self._initial_pose = None
         self._current_pose = None
 
-    def set_scan_pose(self, center_xy: np.ndarray, height_m: float, yaw_rad: float) -> ObjectPoseEstimate:
+    def set_scan_pose(
+        self,
+        center_xy: np.ndarray,
+        height_m: float,
+        yaw_rad: float,
+        *,
+        rotation: np.ndarray | None = None,
+        upright: bool = True,
+    ) -> ObjectPoseEstimate:
         """Update initial resting pose while the object is still sitting on the scan spot."""
         if self.phase != "scanning":
             assert self._current_pose is not None
             return self._current_pose
-        z_c = self.z_table + 0.5 * max(height_m, 0.01)
-        T = upright_se3(center_xy, z_c, yaw_rad)
+        h_use = max(float(height_m), 0.01)
+        z_c = self.z_table + 0.5 * h_use
+        if rotation is not None:
+            R_use = _orthonormalize_so3(rotation)
+            pos = np.array([float(center_xy[0]), float(center_xy[1]), float(z_c)], dtype=float)
+        else:
+            T = upright_se3(center_xy, z_c, yaw_rad)
+            R_use = T[:3, :3].copy()
+            pos = T[:3, 3].copy()
         est = ObjectPoseEstimate(
             phase="scanning",
-            position_m=T[:3, 3].copy(),
-            rotation=T[:3, :3].copy(),
+            position_m=pos,
+            rotation=R_use,
             yaw_rad=float(yaw_rad),
-            resting_height_m=max(height_m, 0.01),
-            upright=True,
+            resting_height_m=h_use,
+            upright=bool(upright),
         )
         self._initial_pose = est
         self._current_pose = est
@@ -149,32 +248,38 @@ class RelocationTracker:
         *,
         n_voxels: int,
         ref_obj: RefObject | None = None,
+        rotation: np.ndarray | None = None,
+        upright: bool | None = None,
     ) -> ObjectPoseEstimate:
         """Update resting pose in `placed` phase when additional tactile points refine the object."""
         prev = self._current_pose
-        upright = True if prev is None else prev.upright
-        if ref_obj is not None:
-            ext = ref_obj.extents()
-            h_rest = float(ext[2]) if (upright or ref_obj.shape == "sphere") else float(min(ext[:2]))
+        fallback_h = max(float(height_m), 0.01 if prev is None else prev.resting_height_m)
+        if rotation is not None:
+            R_raw = rotation
+        elif prev is not None:
+            R_raw = prev.rotation
         else:
-            h_rest = max(height_m, 0.01 if prev is None else prev.resting_height_m)
+            R_raw = upright_se3(center_xy, 0.0, yaw_rad)[:3, :3]
+
+        R_use, h_rest, yaw_snap, up_snap = snap_rotation_to_table(R_raw, ref_obj, fallback_h)
+        if upright is not None:
+            up_snap = bool(upright)
 
         if prev is None:
-            xy_use = np.asarray(center_xy, dtype=float)[:2]
-            yaw_use = float(yaw_rad)
+            xy_use = np.asarray(center_xy, dtype=float)[:2].copy()
+            yaw_use = float(yaw_rad) if rotation is None else yaw_snap
         else:
             xy_use = prev.position_m[:2].copy()
-            yaw_use = prev.yaw_rad
+            yaw_use = prev.yaw_rad if rotation is None else yaw_snap
 
         z_c = self.z_table + 0.5 * h_rest
-        T_fin = upright_se3(xy_use, z_c, yaw_use)
         est = ObjectPoseEstimate(
             phase="placed",
-            position_m=T_fin[:3, 3].copy(),
-            rotation=T_fin[:3, :3].copy(),
+            position_m=np.array([float(xy_use[0]), float(xy_use[1]), float(z_c)], dtype=float),
+            rotation=R_use.copy(),
             yaw_rad=yaw_use,
             resting_height_m=h_rest,
-            upright=upright,
+            upright=up_snap,
             cage_rms_mm=0.0 if prev is None else prev.cage_rms_mm,
         )
         self._current_pose = est
@@ -193,7 +298,7 @@ class RelocationTracker:
             rotation=R_now.copy(),
             yaw_rad=yaw,
             resting_height_m=self._current_pose.resting_height_m,
-            upright=bool(abs(R_now[2, 2]) >= math.cos(math.radians(55.0))),
+            upright=bool(R_now[2, 2] >= math.cos(math.radians(55.0))),
         )
         return self._current_pose
 
@@ -203,27 +308,19 @@ class RelocationTracker:
         finger_pads_ws: np.ndarray | None = None,
         ref_obj: RefObject | None = None,
     ) -> ObjectPoseEstimate:
-        """Compute final table-snapped `(x, y, z, yaw)` right before the user opens their hand."""
+        """Compute final table-snapped 3D pose right before the user opens their hand."""
+        fallback_h = 0.10 if self._current_pose is None else self._current_pose.resting_height_m
         if self._T_hand_obj is None:
             # If user jumped straight to PLACED without LOCK_GRASP, centre inside current finger pads
             pads = np.zeros((1, 3)) if (finger_pads_ws is None or len(finger_pads_ws) == 0) else finger_pads_ws
             xy_raw = pads[:, :2].mean(axis=0)
-            yaw_raw = 0.0
-            upright = True
+            R_raw = np.eye(3, dtype=float)
         else:
             T_raw = T_ws_hand @ self._T_hand_obj
             R_raw = T_raw[:3, :3]
             xy_raw = T_raw[:2, 3].copy()
-            yaw_raw = float(math.atan2(R_raw[1, 0], R_raw[0, 0]))
-            upright = bool(abs(R_raw[2, 2]) >= math.cos(math.radians(55.0)))
 
-        if ref_obj is not None:
-            ext = ref_obj.extents()  # [x, y, z] upright
-            H_rest = float(ext[2]) if (upright or ref_obj.shape == "sphere") else float(min(ext[:2]))
-        elif self._current_pose is not None:
-            H_rest = self._current_pose.resting_height_m
-        else:
-            H_rest = 0.10
+        R_snap, H_rest, yaw_raw, upright = snap_rotation_to_table(R_raw, ref_obj, fallback_h)
 
         xy_fin = xy_raw.copy()
         yaw_fin = yaw_raw
@@ -239,14 +336,17 @@ class RelocationTracker:
             xy_fin, yaw_fin, cage_rms_mm = _refine_pose_with_finger_cage(
                 xy_raw, yaw_raw, finger_pads_ws, ref_obj, self.z_table
             )
+            d_yaw = yaw_fin - yaw_raw
+            cy, sy = math.cos(d_yaw), math.sin(d_yaw)
+            Rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+            R_snap = _orthonormalize_so3(Rz @ R_snap)
 
         z_center = self.z_table + 0.5 * H_rest
-        T_snapped = upright_se3(xy_fin, z_center, yaw_fin)
         self.phase = "placed"
         self._current_pose = ObjectPoseEstimate(
             phase="placed",
-            position_m=T_snapped[:3, 3].copy(),
-            rotation=T_snapped[:3, :3].copy(),
+            position_m=np.array([float(xy_fin[0]), float(xy_fin[1]), float(z_center)], dtype=float),
+            rotation=R_snap.copy(),
             yaw_rad=yaw_fin,
             resting_height_m=H_rest,
             upright=upright,

@@ -928,6 +928,154 @@ class RelocationAndEndToEndTests(unittest.TestCase):
         self.assertNotIn("drawPreviewWireframe", INDEX_HTML)
         self.assertIn("const isConfirmed90 = Boolean(tracked && tracked.confirmed_90 && conf > 0.90);", INDEX_HTML)
 
+    def test_sideways_placed_object_matches_cloud_and_keeps_orientation_on_pickup(self):
+        """Sideways placement rotates both cloud/hull and 3D object together, and re-pickup keeps that orientation."""
+
+        def transform_hand_rigid(hand, R_delta: np.ndarray, pivot: np.ndarray, shift: np.ndarray) -> None:
+            hand.wrist_pos = R_delta @ (hand.wrist_pos - pivot) + pivot + shift
+            hand.wrist_rot = R_delta @ hand.wrist_rot
+            hand.palm_center = R_delta @ (hand.palm_center - pivot) + pivot + shift
+            for fname in list(hand.tips_pad.keys()):
+                hand.tips_pad[fname] = R_delta @ (hand.tips_pad[fname] - pivot) + pivot + shift
+
+        ang = math.radians(85.0)
+        R_tilt_x = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, math.cos(ang), -math.sin(ang)],
+                [0.0, math.sin(ang), math.cos(ang)],
+            ],
+            dtype=float,
+        )
+
+        # 1. Red Bull cylinder (upright 133 mm -> placed sideways 53 mm high -> picked up sideways -> placed sideways)
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = ScanTrackSession(source="synthetic", synthetic_object="redbull", sessions_root=tmp)
+            assert sess.synthetic is not None
+            sess.synthetic.auto_cycle = False
+            dt = 1.0 / 30.0
+            for _ in range(int(7.5 / dt)):
+                snap = sess.tick(dt=dt)
+            self.assertEqual(snap["phase"], "scanning")
+            self.assertTrue(snap["catalog"]["confirmed_90"])
+            self.assertGreater(snap["cloud"]["height_mm"], 120.0)
+
+            # Lock grasp (scanning -> carrying)
+            snap_carry1 = sess.handle_action("phase")
+            self.assertEqual(snap_carry1["phase"], "carrying")
+            self.assertTrue(snap_carry1["tracked_object"]["pose"]["upright"])
+
+            # Rotate right hand ~85 deg onto its side and carry to a new table spot, then place
+            assert sess._last_frame_ws is not None and sess._last_frame_ws.right is not None
+            right = sess._last_frame_ws.right
+            p0 = sess.relocation._current_pose.position_m.copy()
+            shift1 = np.array([0.16, -0.10, 0.0265 - p0[2]], dtype=float)
+            transform_hand_rigid(right, R_tilt_x, p0, shift1)
+            sess.relocation.update_carry(make_se3(right.wrist_rot, right.wrist_pos))
+
+            snap_placed1 = sess.handle_action("phase")
+            self.assertEqual(snap_placed1["phase"], "placed")
+            self.assertTrue(snap_placed1["catalog"]["confirmed_90"])
+            self.assertIsNotNone(snap_placed1["tracked_object"])
+            self.assertEqual(snap_placed1["tracked_object"]["key"], "redbull")
+
+            pose_p1 = snap_placed1["tracked_object"]["pose"]
+            R_p1 = np.asarray(pose_p1["rotation"], dtype=float)
+            self.assertFalse(pose_p1["upright"])
+            self.assertAlmostEqual(pose_p1["z_bottom_m"], 0.0, places=3)
+            self.assertAlmostEqual(pose_p1["resting_height_m"], 0.053, delta=0.004)
+            # Cylinder local Z axis must now lie horizontal in the XY plane
+            self.assertLess(abs(R_p1[2, 2]), 0.05)
+
+            # Point cloud & 3D Convex Hull MUST have rotated to match the sideways object (height ~53 mm, length ~133 mm)
+            self.assertGreater(snap_placed1["cloud"]["height_mm"], 44.0)
+            self.assertLess(snap_placed1["cloud"]["height_mm"], 62.0)
+            self.assertGreater(snap_placed1["cloud"]["length_mm"], 115.0)
+            pts_p1 = np.asarray(snap_placed1["cloud"]["points"], dtype=float)
+            hull_p1 = np.asarray(snap_placed1["hull"]["vertices"], dtype=float)
+            self.assertLess(np.linalg.norm(pts_p1[:, :2].mean(axis=0) - np.array([pose_p1["x_m"], pose_p1["y_m"]])), 0.015)
+            self.assertLess(np.linalg.norm(hull_p1[:, :2].mean(axis=0) - np.array([pose_p1["x_m"], pose_p1["y_m"]])), 0.015)
+            self.assertLess(float(pts_p1[:, 2].max()), 0.062)
+
+            # Pick up the sideways placed object (placed -> carrying): MUST keep sideways orientation!
+            snap_pickup = sess.handle_action("phase")
+            self.assertEqual(snap_pickup["phase"], "carrying")
+            self.assertIsNotNone(snap_pickup["tracked_object"])
+            pose_carry2 = snap_pickup["tracked_object"]["pose"]
+            self.assertFalse(pose_carry2["upright"])
+            np.testing.assert_allclose(np.asarray(pose_carry2["rotation"], dtype=float), R_p1, atol=1e-4)
+
+            # Lift straight up +8 cm without rotating the wrist: both object and cloud stay sideways
+            p1_vec = np.array([pose_p1["x_m"], pose_p1["y_m"], pose_p1["z_center_m"]], dtype=float)
+            transform_hand_rigid(right, np.eye(3), p1_vec, np.array([0.05, 0.06, 0.08], dtype=float))
+            sess.relocation.update_carry(make_se3(right.wrist_rot, right.wrist_pos))
+            snap_lifted = sess._snapshot_unlocked()
+            pose_lifted = snap_lifted["tracked_object"]["pose"]
+            self.assertFalse(pose_lifted["upright"])
+            np.testing.assert_allclose(np.asarray(pose_lifted["rotation"], dtype=float), R_p1, atol=1e-4)
+            pts_lifted = np.asarray(snap_lifted["cloud"]["points"], dtype=float)
+            self.assertLess(float(pts_lifted[:, 2].max() - pts_lifted[:, 2].min()), 0.062)
+
+            # Place a second time without wrist rotation: remains sideways & confirmed >90%
+            p_lift_vec = np.array([pose_lifted["x_m"], pose_lifted["y_m"], pose_lifted["z_center_m"]], dtype=float)
+            transform_hand_rigid(right, np.eye(3), p_lift_vec, np.array([0.04, 0.03, -0.08], dtype=float))
+            sess.relocation.update_carry(make_se3(right.wrist_rot, right.wrist_pos))
+            snap_placed2 = sess.handle_action("phase")
+            self.assertEqual(snap_placed2["phase"], "placed")
+            self.assertTrue(snap_placed2["catalog"]["confirmed_90"])
+            self.assertFalse(snap_placed2["tracked_object"]["pose"]["upright"])
+            self.assertAlmostEqual(snap_placed2["tracked_object"]["pose"]["resting_height_m"], 0.053, delta=0.004)
+            self.assertLess(snap_placed2["cloud"]["height_mm"], 62.0)
+            sess.close()
+
+        # 2. Kantolan Suola Cracker box (flat 45 mm -> placed on 66 mm side edge -> picked up preserving side edge)
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = ScanTrackSession(
+                source="synthetic", synthetic_object="kantolan_suola_cracker", sessions_root=tmp
+            )
+            assert sess.synthetic is not None
+            sess.synthetic.auto_cycle = False
+            dt = 1.0 / 30.0
+            for _ in range(int(7.5 / dt)):
+                snap = sess.tick(dt=dt)
+            self.assertTrue(snap["catalog"]["confirmed_90"])
+            self.assertAlmostEqual(snap["cloud"]["height_mm"], 45.0, delta=8.0)
+
+            snap_carry = sess.handle_action("phase")
+            self.assertEqual(snap_carry["phase"], "carrying")
+            assert sess._last_frame_ws is not None and sess._last_frame_ws.right is not None
+            right = sess._last_frame_ws.right
+            p0 = sess.relocation._current_pose.position_m.copy()
+            R0 = sess.relocation._current_pose.rotation.copy()
+            # Rotate ~85 deg around box's world-space long X axis so its 66 mm Y-face stands vertical
+            ax = R0[:, 0] / np.linalg.norm(R0[:, 0])
+            K = np.array([[0.0, -ax[2], ax[1]], [ax[2], 0.0, -ax[0]], [-ax[1], ax[0], 0.0]], dtype=float)
+            R_roll = np.eye(3) + math.sin(ang) * K + (1.0 - math.cos(ang)) * (K @ K)
+            transform_hand_rigid(right, R_roll, p0, np.array([0.14, -0.09, 0.033 - p0[2]], dtype=float))
+            sess.relocation.update_carry(make_se3(right.wrist_rot, right.wrist_pos))
+
+            snap_box_placed = sess.handle_action("phase")
+            self.assertEqual(snap_box_placed["phase"], "placed")
+            self.assertTrue(snap_box_placed["catalog"]["confirmed_90"])
+            self.assertIsNotNone(snap_box_placed["tracked_object"])
+            pose_bp = snap_box_placed["tracked_object"]["pose"]
+            R_bp = np.asarray(pose_bp["rotation"], dtype=float)
+            self.assertFalse(pose_bp["upright"])
+            self.assertAlmostEqual(pose_bp["resting_height_m"], 0.066, delta=0.004)
+            self.assertAlmostEqual(snap_box_placed["cloud"]["height_mm"], 66.0, delta=9.0)
+
+            snap_box_pickup = sess.handle_action("phase")
+            self.assertEqual(snap_box_pickup["phase"], "carrying")
+            self.assertFalse(snap_box_pickup["tracked_object"]["pose"]["upright"])
+            np.testing.assert_allclose(
+                np.asarray(snap_box_pickup["tracked_object"]["pose"]["rotation"], dtype=float),
+                R_bp,
+                atol=1e-4,
+            )
+            sess.close()
+
+        self.assertNotIn("laidOnSide", INDEX_HTML)
+
 
 class UndoBehaviourTests(unittest.TestCase):
     def _session(self, tmp):

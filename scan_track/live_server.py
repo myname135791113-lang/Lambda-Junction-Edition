@@ -626,15 +626,11 @@ function drawRoundedPill2D(x, y, w, h, r, fill, stroke, lineW) {
   ctx.restore();
 }
 
-function xformLocal(lx, ly, lz, R, c, laidOnSide) {
-  // If a cylinder/box was explicitly placed on its side, rotate local Z onto horizontal Y
-  const ux = lx;
-  const uy = laidOnSide ? -lz : ly;
-  const uz = laidOnSide ? ly : lz;
+function xformLocal(lx, ly, lz, R, c) {
   return [
-    c[0] + R[0][0] * ux + R[0][1] * uy + R[0][2] * uz,
-    c[1] + R[1][0] * ux + R[1][1] * uy + R[1][2] * uz,
-    c[2] + R[2][0] * ux + R[2][1] * uy + R[2][2] * uz,
+    c[0] + R[0][0] * lx + R[0][1] * ly + R[0][2] * lz,
+    c[1] + R[1][0] * lx + R[1][1] * ly + R[1][2] * lz,
+    c[2] + R[2][0] * lx + R[2][1] * ly + R[2][2] * lz,
   ];
 }
 
@@ -652,15 +648,14 @@ function buildConfirmedStructure(tracked) {
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const R = p.rotation || [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]];
   const center = [p.x_m, p.y_m, p.z_center_m];
-  const laidOnSide = (p.phase === 'placed' && p.upright === false && tracked.shape !== 'sphere');
 
   const tris = [];   // { v0, v1, v2, rgb } outward-oriented world triangles
   const ribs = [];   // { a, b, nrm, bold } structural CAD lines with surface normal for X-ray front/back styling
 
-  const W = (lx, ly, lz) => xformLocal(lx, ly, lz, R, center, laidOnSide);
+  const W = (lx, ly, lz) => xformLocal(lx, ly, lz, R, center);
   const Nrm = (nx, ny, nz) => {
     const c0 = [0, 0, 0];
-    return xformLocal(nx, ny, nz, R, c0, laidOnSide);
+    return xformLocal(nx, ny, nz, R, c0);
   };
   const addQuad = (p00, p10, p11, p01, rgb) => {
     tris.push({ v0: p00, v1: p10, v2: p11, rgb });
@@ -1098,8 +1093,13 @@ function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, z
   const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.005);
 
   // 1. Ground Footprint Halo, Orientation Arrow & Carry Plumb-Line on z = zT
-  const footR = Math.max(ex, ey) * 0.58 + 0.008;
   const yaw = p.yaw_rad || 0;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const R = p.rotation || [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]];
+  const wx = Math.abs(R[0][0]) * ex + Math.abs(R[0][1]) * ey + Math.abs(R[0][2]) * ez;
+  const wy = Math.abs(R[1][0]) * ex + Math.abs(R[1][1]) * ey + Math.abs(R[1][2]) * ez;
+  const wz = Math.abs(R[2][0]) * ex + Math.abs(R[2][1]) * ey + Math.abs(R[2][2]) * ez;
+  const footR = Math.max(wx, wy) * 0.56 + 0.008;
   const segN = 28;
   for (let i = 0; i < segN; i++) {
     const a0 = (i / segN) * Math.PI * 2, a1 = ((i + 1) / segN) * Math.PI * 2;
@@ -1126,7 +1126,7 @@ function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, z
   );
   // Vertical laser drop-line while carrying in mid-air
   if (phase === 'carrying' || (p.z_bottom_m - zT) > 0.012) {
-    drawLine3D([p.x_m, p.y_m, p.z_center_m - ez * 0.48], [p.x_m, p.y_m, zT], '#f59e0b', 1.8, [5, 4], basis);
+    drawLine3D([p.x_m, p.y_m, p.z_center_m - wz * 0.48], [p.x_m, p.y_m, zT], '#f59e0b', 1.8, [5, 4], basis);
     drawLine3D([p.x_m - 0.018, p.y_m, zT + 0.001], [p.x_m + 0.018, p.y_m, zT + 0.001], '#f59e0b', 2.0, [], basis);
     drawLine3D([p.x_m, p.y_m - 0.018, zT + 0.001], [p.x_m, p.y_m + 0.018, zT + 0.001], '#f59e0b', 2.0, [], basis);
   }
@@ -1211,8 +1211,8 @@ function renderConfirmedStructure(tracked, isConfirmed90, isSeeThrough, basis, z
   }
 
   // 4. High-Visibility Floating 3D Confirmation Badge above the Structure
-  const topAnchor = [p.x_m, p.y_m, p.z_center_m + ez * 0.5 + 0.012];
-  const labelAnchor = [p.x_m, p.y_m, p.z_center_m + ez * 0.5 + 0.048];
+  const topAnchor = [p.x_m, p.y_m, p.z_center_m + wz * 0.5 + 0.012];
+  const labelAnchor = [p.x_m, p.y_m, p.z_center_m + wz * 0.5 + 0.048];
   const spTop = project3DWithBasis(topAnchor, basis);
   const spLbl = project3DWithBasis(labelAnchor, basis);
   if (spTop && spLbl) {

@@ -114,6 +114,7 @@ def match_scan_to_catalog(
 
         # If we have a template fit for `ref.shape`, blend its fitted extents with raw OBB
         t_fit = prim_fits.get(ref.shape)
+        cyl_sideways = bool(t_fit and ref.shape == "cylinder" and t_fit.get("sideways", False))
         if t_fit is not None:
             td = t_fit["dims_m"]
             if ref.shape == "sphere":
@@ -122,18 +123,41 @@ def match_scan_to_catalog(
                 H_eff = max(H_meas, 0.65 * d_fit + 0.35 * H_meas)
             elif ref.shape == "cylinder":
                 d_fit = 2.0 * td["radius"]
-                L_eff = W_eff = d_fit
-                H_eff = max(H_meas, 0.65 * td["height"] + 0.35 * H_meas)
+                if cyl_sideways:
+                    L_eff = 0.65 * td["height"] + 0.35 * L_meas
+                    W_eff = d_fit
+                    H_eff = max(H_meas, 0.65 * d_fit + 0.35 * H_meas)
+                else:
+                    L_eff = W_eff = d_fit
+                    H_eff = max(H_meas, 0.65 * td["height"] + 0.35 * H_meas)
             else:
                 L_eff, W_eff = sorted([td["width"], td["depth"]], reverse=True)
                 H_eff = max(H_meas, 0.65 * td["height"] + 0.35 * H_meas)
         else:
             L_eff, W_eff, H_eff = L_meas, W_meas, H_meas
 
-        # Normalized squared residuals (11 mm floor or 8% of reference extent for long boxes)
-        err_h = ((H_eff - H_ref) / max(0.011, 0.08 * H_ref)) ** 2
-        err_l = ((L_eff - L_ref) / max(0.011, 0.08 * L_ref)) ** 2
-        err_w = ((W_eff - W_ref) / max(0.011, 0.08 * W_ref)) ** 2
+        # Support sideways / rotated resting orientations so sideways-placed objects stay matched!
+        orient_candidates: list[tuple[float, float, float]] = [(L_ref, W_ref, H_ref)]
+        if ref.shape == "cylinder" and (cyl_sideways or float(prim_weights.get("cylinder", 0.0)) >= 0.20):
+            orient_candidates.append((float(ext[2]), float(ext[0]), float(ext[0])))
+        elif ref.shape == "box" and float(prim_weights.get("box", 0.0)) >= 0.25:
+            for k_up in (0, 1):
+                lr, wr = sorted([float(ext[j]) for j in range(3) if j != k_up], reverse=True)
+                orient_candidates.append((lr, wr, float(ext[k_up])))
+
+        best_dim_err = float("inf")
+        best_ref_lwh = (L_ref, W_ref, H_ref)
+        for lr, wr, hr in orient_candidates:
+            eh = ((H_eff - hr) / max(0.011, 0.08 * hr)) ** 2
+            el = ((L_eff - lr) / max(0.011, 0.08 * lr)) ** 2
+            ew = ((W_eff - wr) / max(0.011, 0.08 * wr)) ** 2
+            d_sum = eh + el + ew
+            if d_sum < best_dim_err:
+                best_dim_err = d_sum
+                best_ref_lwh = (lr, wr, hr)
+
+        L_ref_eff, W_ref_eff, H_ref_eff = best_ref_lwh
+        err_dim = best_dim_err
 
         # Hull volume term (a partial scan hull typically captures ~80-100% of true volume)
         err_v = 0.0
@@ -157,16 +181,16 @@ def match_scan_to_catalog(
             p_shape = 0.0
             shape_nll = 0.0
 
-        total_d2 = err_h + err_l + err_w + 0.6 * err_v + err_cal + shape_nll
+        total_d2 = err_dim + 0.6 * err_v + err_cal + shape_nll
         log_scores[key] = -0.5 * total_d2
         cal_d2_map[key] = err_cal
         details[key] = {
             "H_mm": round(H_eff * 1000.0, 1),
             "L_mm": round(L_eff * 1000.0, 1),
             "W_mm": round(W_eff * 1000.0, 1),
-            "ref_H_mm": round(H_ref * 1000.0, 1),
-            "ref_L_mm": round(L_ref * 1000.0, 1),
-            "ref_W_mm": round(W_ref * 1000.0, 1),
+            "ref_H_mm": round(H_ref_eff * 1000.0, 1),
+            "ref_L_mm": round(L_ref_eff * 1000.0, 1),
+            "ref_W_mm": round(W_ref_eff * 1000.0, 1),
             "shape_prob": round(p_shape, 3),
             "distance_sq": round(total_d2, 2),
         }

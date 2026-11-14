@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import math
 import threading
 import time
 from typing import Any
@@ -181,8 +182,8 @@ class ScanTrackSession:
                         self._ingest_tactile_events_unlocked(right, ev)
                         self._refresh_scan_and_match_unlocked()
                         if self._last_scan.n_voxels >= 3:
-                            xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked()
-                            self.relocation.set_scan_pose(xy_s, h_s, yaw_s)
+                            xy_s, h_s, yaw_s, R_s, up_s = self._estimate_scan_pose_unlocked()
+                            self.relocation.set_scan_pose(xy_s, h_s, yaw_s, rotation=R_s, upright=up_s)
 
                 elif self.relocation.phase == "carrying":
                     # Strictly forbid adding or queueing any points while carrying the object
@@ -211,8 +212,9 @@ class ScanTrackSession:
                             self._refresh_scan_and_match_unlocked()
                             self._locked_key = self._confirmed_catalog_key_unlocked()
                             ref_obj = self.catalog.get(self._locked_key) if self._locked_key else None
-                            xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
-                            if prev_locked != self._locked_key and self._locked_key is not None:
+                            xy_s, h_s, yaw_s, R_s, up_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
+                            newly_locked = prev_locked != self._locked_key and self._locked_key is not None
+                            if newly_locked:
                                 self.relocation._current_pose = None
                             self.relocation.refresh_placed_from_scan(
                                 xy_s,
@@ -220,6 +222,8 @@ class ScanTrackSession:
                                 yaw_s,
                                 n_voxels=self._last_scan.n_voxels,
                                 ref_obj=ref_obj,
+                                rotation=R_s if newly_locked else None,
+                                upright=up_s if newly_locked else None,
                             )
                             self._placed_dirty = True
                         if self._placed_dirty and (discrete or not ev.stream_index):
@@ -349,26 +353,90 @@ class ScanTrackSession:
 
     def _estimate_scan_pose_unlocked(
         self, ref_override: RefObject | None = None
-    ) -> tuple[np.ndarray, float, float]:
+    ) -> tuple[np.ndarray, float, float, np.ndarray, bool]:
         xy = self._last_scan.center_xy
         h = self._last_scan.height_m
         yaw = self._last_scan.yaw_rad
+        cy0, sy0 = math.cos(yaw), math.sin(yaw)
+        R_scan = np.array([[cy0, -sy0, 0.0], [sy0, cy0, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+        upright = True
 
         confirmed_key = self._confirmed_catalog_key_unlocked()
         key = (ref_override.key if ref_override is not None else None) or confirmed_key
         ref_obj = ref_override or (self.catalog.get(key) if key else None)
         if ref_obj is not None and self._last_scan.n_voxels >= 10:
-            xy, yaw = fit_reference_pose_xy_yaw(
-                self.cloud.points(),
-                ref_obj.shape,
-                ref_obj.dims,
-                self.cal.z_table,
-                xy,
-                yaw,
-            )
-            h = float(ref_obj.extents()[2])
+            pts = self.cloud.points()
+            ext = ref_obj.extents()
+            if ref_obj.shape == "sphere":
+                xy, yaw = fit_reference_pose_xy_yaw(pts, "sphere", ref_obj.dims, self.cal.z_table, xy, yaw)
+                h = float(ext[2])
+                cy, sy = math.cos(yaw), math.sin(yaw)
+                R_scan = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+                upright = True
+            elif ref_obj.shape == "cylinder":
+                cyl_fit = self._last_scan.primitive_fit.get("fits", {}).get("cylinder")
+                is_side = bool(cyl_fit and cyl_fit.get("sideways", False)) or (
+                    abs(h - float(ext[0])) + 0.015 < abs(h - float(ext[2]))
+                    and self._last_scan.length_m > 0.5 * (float(ext[0]) + float(ext[2]))
+                )
+                if is_side:
+                    xy, yaw = fit_reference_pose_xy_yaw(pts, "cylinder_side", ref_obj.dims, self.cal.z_table, xy, yaw)
+                    h = float(ext[0])
+                    cy, sy = math.cos(yaw), math.sin(yaw)
+                    R_scan = np.array([[0.0, sy, cy], [0.0, -cy, sy], [1.0, 0.0, 0.0]], dtype=float)
+                    upright = False
+                else:
+                    xy, yaw = fit_reference_pose_xy_yaw(pts, "cylinder", ref_obj.dims, self.cal.z_table, xy, yaw)
+                    h = float(ext[2])
+                    cy, sy = math.cos(yaw), math.sin(yaw)
+                    R_scan = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+                    upright = True
+            else:
+                best_k_up = 2
+                best_axes = (0, 1)
+                best_lwh = (float(ext[0]), float(ext[1]), float(ext[2]))
+                best_sc = float("inf")
+                for k_up in (2, 1, 0):
+                    hr = float(ext[k_up])
+                    horiz = [j for j in range(3) if j != k_up]
+                    j_long = max(horiz, key=lambda j: float(ext[j]))
+                    j_short = [j for j in horiz if j != j_long][0]
+                    lr, wr = float(ext[j_long]), float(ext[j_short])
+                    sc = (
+                        ((self._last_scan.height_m - hr) / max(0.011, 0.08 * hr)) ** 2
+                        + ((self._last_scan.length_m - lr) / max(0.011, 0.08 * lr)) ** 2
+                        + ((self._last_scan.width_m - wr) / max(0.011, 0.08 * wr)) ** 2
+                    )
+                    if sc < best_sc:
+                        best_sc = sc
+                        best_k_up = k_up
+                        best_axes = (j_long, j_short)
+                        best_lwh = (lr, wr, hr)
 
-        return xy, h, yaw
+                if best_k_up == 2:
+                    xy, yaw = fit_reference_pose_xy_yaw(pts, "box", ref_obj.dims, self.cal.z_table, xy, yaw)
+                    h = float(ext[2])
+                    cy, sy = math.cos(yaw), math.sin(yaw)
+                    R_scan = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+                    upright = True
+                else:
+                    j_long, j_short = best_axes
+                    lr, wr, hr = best_lwh
+                    xy, yaw = fit_reference_pose_xy_yaw(
+                        pts, "box", {"x": lr, "y": wr, "z": hr}, self.cal.z_table, xy, yaw
+                    )
+                    h = hr
+                    cy, sy = math.cos(yaw), math.sin(yaw)
+                    R_scan = np.zeros((3, 3), dtype=float)
+                    R_scan[:, best_k_up] = [0.0, 0.0, 1.0]
+                    R_scan[:, j_long] = [cy, sy, 0.0]
+                    if (j_long - best_k_up) % 3 == 1:
+                        R_scan[:, j_short] = np.cross(R_scan[:, best_k_up], R_scan[:, j_long])
+                    else:
+                        R_scan[:, j_short] = np.cross(R_scan[:, j_long], R_scan[:, best_k_up])
+                    upright = False
+
+        return xy, h, yaw, R_scan, upright
 
     def _enter_carrying_unlocked(self, right: HandPose) -> bool:
         if self.relocation.phase == "scanning" and self._last_scan.n_voxels == 0:
@@ -397,8 +465,8 @@ class ScanTrackSession:
         )
         if self.relocation.phase == "scanning":
             if ref_obj is not None:
-                xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
-                self.relocation.set_scan_pose(xy_s, h_s, yaw_s)
+                xy_s, h_s, yaw_s, R_s, up_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
+                self.relocation.set_scan_pose(xy_s, h_s, yaw_s, rotation=R_s, upright=up_s)
             else:
                 self.relocation.set_scan_pose(fallback_xy, H_init, self._last_scan.yaw_rad)
         T_ws_hand = make_se3(right.wrist_rot, right.wrist_pos)
@@ -426,15 +494,21 @@ class ScanTrackSession:
         T_ws_hand = make_se3(right.wrist_rot, right.wrist_pos)
         placed = self.relocation.place_on_table(T_ws_hand, right.pad_matrix(), ref_obj)
 
-        # Relocate accumulated 3D cloud & Convex Hull onto the new placed pose so visual & future scans align!
+        # Relocate accumulated 3D cloud & Convex Hull in full 3D SE(3) onto the placed pose
+        # so the point cloud, convex hull, and rendered 3D object ALWAYS share the exact same orientation!
         if pose_before is not None:
-            self.cloud.transform_planar(
-                pose_before.position_m[:2],
-                pose_before.yaw_rad,
-                placed.position_m[:2],
-                placed.yaw_rad,
+            T_before = make_se3(pose_before.rotation, pose_before.position_m)
+            T_placed = make_se3(placed.rotation, placed.position_m)
+            self.cloud.transform_se3(
+                T_before,
+                T_placed,
+                snap_min_z_to_table=(ref_obj is None),
             )
             self._refresh_scan_and_match_unlocked()
+            if ref_obj is None and self._last_scan.n_voxels >= 1:
+                h_new = max(self._last_scan.height_m, 0.02)
+                placed.resting_height_m = h_new
+                placed.position_m[2] = self.cal.z_table + 0.5 * h_new
 
         self.cloud.locked = False
         self.gestures.clear_scan_commands()
@@ -577,13 +651,14 @@ class ScanTrackSession:
                     prev_locked = self._locked_key
                     self._refresh_scan_and_match_unlocked()
                     if self.relocation.phase == "scanning" and self._last_scan.n_voxels >= 3:
-                        xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked()
-                        self.relocation.set_scan_pose(xy_s, h_s, yaw_s)
+                        xy_s, h_s, yaw_s, R_s, up_s = self._estimate_scan_pose_unlocked()
+                        self.relocation.set_scan_pose(xy_s, h_s, yaw_s, rotation=R_s, upright=up_s)
                     elif self.relocation.phase == "placed":
                         self._locked_key = self._confirmed_catalog_key_unlocked()
                         ref_obj = self.catalog.get(self._locked_key) if self._locked_key else None
-                        xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
-                        if prev_locked != self._locked_key and self._locked_key is not None:
+                        xy_s, h_s, yaw_s, R_s, up_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
+                        newly_locked = prev_locked != self._locked_key and self._locked_key is not None
+                        if newly_locked:
                             self.relocation._current_pose = None
                         placed_est = self.relocation.refresh_placed_from_scan(
                             xy_s,
@@ -591,6 +666,8 @@ class ScanTrackSession:
                             yaw_s,
                             n_voxels=self._last_scan.n_voxels,
                             ref_obj=ref_obj,
+                            rotation=R_s if newly_locked else None,
+                            upright=up_s if newly_locked else None,
                         )
                         self._write_placed_outputs_unlocked(placed_est)
                         self._placed_dirty = False
