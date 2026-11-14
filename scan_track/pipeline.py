@@ -19,9 +19,9 @@ from .catalog_matcher import (
     load_catalog,
     match_scan_to_catalog,
 )
-from .cloud_hull import ScanSummary, TactileCloudBuilder
+from .cloud_hull import ScanSummary, TactileCloudBuilder, fit_reference_pose_xy_yaw
 from .gestures import GestureController, GestureEvent
-from .relocation import ObjectPoseEstimate, RelocationTracker, make_se3
+from .relocation import ObjectPoseEstimate, RelocationTracker, invert_se3, make_se3
 from .rokoko_stream import (
     DualHandFrame,
     HandPose,
@@ -70,11 +70,11 @@ class ScanTrackSession:
 
         self.sessions_root = Path(sessions_root)
         self.sessions_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() % 1_000_000:06d}_{source}"
+        stamp = time.strftime("%H%M%S")
         cand = self.sessions_root / stamp
         idx = 1
         while cand.exists():
-            cand = self.sessions_root / f"{stamp}_{idx:02d}"
+            cand = self.sessions_root / f"{stamp}_{idx}"
             idx += 1
         cand.mkdir(parents=True, exist_ok=False)
         self.session_dir = cand
@@ -96,6 +96,8 @@ class ScanTrackSession:
         self._object_card: dict[str, Any] | None = None
         self._mujoco_result: dict[str, Any] | None = None
         self._g1_plan: dict[str, Any] | None = None
+        self._placed_dirty: bool = False
+        self._logged_90_key: str | None = None
         self._event_log: list[str] = ["Session initialized. Ready to scan on flat surface."]
         self._prev_synth_t: float = 0.0
         self._last_processed_seq: int = -1
@@ -168,25 +170,11 @@ class ScanTrackSession:
             right = frame_ws.right
             if right is not None:
                 if self.relocation.phase == "scanning":
-                    if ev.stream_index:
-                        self.cloud.add_points(right.tips_pad["index"])
-                    if ev.snapshot_5:
-                        n_new = self.cloud.add_points(right.pad_matrix())
-                        self._log(f"5-finger snapshot captured (+{n_new} new voxels).")
-                    if ev.caliper_pinch:
-                        dist = float(np.linalg.norm(right.tips_pad["thumb"] - right.tips_pad["index"]))
-                        self.cloud.add_caliper_width(dist)
-                        self.cloud.add_points(np.vstack([right.tips_pad["thumb"], right.tips_pad["index"]]))
-                        self._log(f"Caliper pinch recorded: {dist * 1000.0:.1f} mm.")
-
-                    self._last_scan = self.cloud.summarize()
-                    self._last_match = match_scan_to_catalog(self._last_scan, self.catalog)
+                    self._ingest_tactile_events_unlocked(right, ev)
+                    self._refresh_scan_and_match_unlocked()
                     if self._last_scan.n_voxels >= 3:
-                        self.relocation.set_scan_pose(
-                            self._last_scan.center_xy,
-                            self._last_scan.height_m,
-                            self._last_scan.yaw_rad,
-                        )
+                        xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked()
+                        self.relocation.set_scan_pose(xy_s, h_s, yaw_s)
 
                     if ev.phase_toggle and self._last_scan.n_voxels >= 5:
                         self._enter_carrying_unlocked(right)
@@ -197,10 +185,96 @@ class ScanTrackSession:
                     if ev.phase_toggle:
                         self._finalize_placement_unlocked(right)
 
+                elif self.relocation.phase == "placed":
+                    if ev.phase_toggle:
+                        self._enter_carrying_unlocked(right)
+                    else:
+                        changed, discrete = self._ingest_tactile_events_unlocked(right, ev)
+                        if changed or discrete:
+                            self._refresh_scan_and_match_unlocked()
+                            self._locked_key = self._last_match.best_key or self._locked_key
+                            ref_obj = self.catalog.get(self._locked_key) if self._locked_key else None
+                            xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
+                            self.relocation.refresh_placed_from_scan(
+                                xy_s,
+                                h_s,
+                                yaw_s,
+                                n_voxels=self._last_scan.n_voxels,
+                                ref_obj=ref_obj,
+                            )
+                            self._placed_dirty = True
+                        if self._placed_dirty and (discrete or not ev.stream_index):
+                            if self.relocation._current_pose is not None:
+                                self._write_placed_outputs_unlocked(self.relocation._current_pose)
+                            self._placed_dirty = False
+
             return self._snapshot_unlocked()
 
+    def _ingest_tactile_events_unlocked(
+        self, right: HandPose, ev: GestureEvent
+    ) -> tuple[bool, bool]:
+        """Record any active trace, 5-finger snapshot, or caliper width; return (changed, discrete)."""
+        changed = False
+        discrete = False
+        if ev.stream_index:
+            n_idx = self.cloud.add_points(right.tips_pad["index"])
+            changed = changed or (n_idx > 0)
+        if ev.snapshot_5:
+            n_new = self.cloud.add_points(right.pad_matrix())
+            self._log(f"5-finger snapshot captured (+{n_new} new voxels).")
+            changed = changed or (n_new > 0)
+            discrete = True
+        if ev.caliper_pinch:
+            dist = float(np.linalg.norm(right.tips_pad["thumb"] - right.tips_pad["index"]))
+            self.cloud.add_caliper_width(dist)
+            n_cal = self.cloud.add_points(np.vstack([right.tips_pad["thumb"], right.tips_pad["index"]]))
+            self._log(f"Caliper pinch recorded: {dist * 1000.0:.1f} mm.")
+            changed = changed or (n_cal > 0)
+            discrete = True
+        return changed, discrete
+
+    def _refresh_scan_and_match_unlocked(self) -> None:
+        self._last_scan = self.cloud.summarize()
+        self._last_match = match_scan_to_catalog(self._last_scan, self.catalog)
+        best_k = self._last_match.best_key
+        if best_k is not None and self._last_scan.n_voxels >= 10:
+            prob = float(self._last_match.probabilities.get(best_k, 0.0))
+            if prob > 0.90 and self._logged_90_key != best_k and best_k in self.catalog:
+                self._logged_90_key = best_k
+                self._log(
+                    f"CONFIRMED >90%: {self.catalog[best_k].label} ({prob * 100.0:.0f}%) — 3D structure locked!"
+                )
+
+    def _estimate_scan_pose_unlocked(
+        self, ref_override: RefObject | None = None
+    ) -> tuple[np.ndarray, float, float]:
+        xy = self._last_scan.center_xy
+        h = self._last_scan.height_m
+        yaw = self._last_scan.yaw_rad
+
+        key = (ref_override.key if ref_override is not None else None) or self._locked_key or self._last_match.best_key
+        ref_obj = ref_override or (self.catalog.get(key) if key else None)
+        if ref_obj is not None and self._last_scan.n_voxels >= 8:
+            prob = float(self._last_match.probabilities.get(ref_obj.key, 0.0))
+            is_locked = self._locked_key == ref_obj.key
+            if is_locked or prob >= 0.70:
+                xy, yaw = fit_reference_pose_xy_yaw(
+                    self.cloud.points(),
+                    ref_obj.shape,
+                    ref_obj.dims,
+                    self.cal.z_table,
+                    xy,
+                    yaw,
+                )
+            if is_locked or prob >= 0.80:
+                h = float(ref_obj.extents()[2])
+
+        return xy, h, yaw
+
     def _enter_carrying_unlocked(self, right: HandPose) -> None:
-        self._locked_key = self._last_match.best_key or next(iter(self.catalog))
+        self.gestures.manual_trace_enabled = False
+        self._placed_dirty = False
+        self._locked_key = self._last_match.best_key or self._locked_key or next(iter(self.catalog))
         ref_obj = self.catalog[self._locked_key]
         H_init = float(ref_obj.extents()[2]) if self._last_scan.height_m < 0.02 else self._last_scan.height_m
         T_ws_hand = make_se3(right.wrist_rot, right.wrist_pos)
@@ -216,9 +290,32 @@ class ScanTrackSession:
     def _finalize_placement_unlocked(self, right: HandPose) -> None:
         key = self._locked_key or self._last_match.best_key or next(iter(self.catalog))
         ref_obj = self.catalog[key]
+        pose_before = self.relocation._initial_pose
         T_ws_hand = make_se3(right.wrist_rot, right.wrist_pos)
         placed = self.relocation.place_on_table(T_ws_hand, right.pad_matrix(), ref_obj)
 
+        # Relocate accumulated 3D cloud & Convex Hull onto the new placed pose so visual & future scans align!
+        if pose_before is not None:
+            self.cloud.transform_planar(
+                pose_before.position_m[:2],
+                pose_before.yaw_rad,
+                placed.position_m[:2],
+                placed.yaw_rad,
+            )
+            self._refresh_scan_and_match_unlocked()
+
+        self._placed_dirty = False
+        self._write_placed_outputs_unlocked(placed)
+        mj_tag = self._mujoco_result["outcome"].upper() if self._mujoco_result else "OK"
+        arm_tag = self._g1_plan["arm"] if self._g1_plan else "auto"
+        self._log(
+            f"PLACED at ws=({placed.position_m[0]*100:.1f}, {placed.position_m[1]*100:.1f}) cm | "
+            f"MuJoCo: {mj_tag} | Unitree G1 ({arm_tag} arm) plan ready!"
+        )
+
+    def _write_placed_outputs_unlocked(self, placed: ObjectPoseEstimate) -> None:
+        key = self._locked_key or self._last_match.best_key or next(iter(self.catalog))
+        ref_obj = self.catalog[key]
         z_bot = placed.position_m[2] - 0.5 * placed.resting_height_m
         robot_pose = self.cal.workspace_to_robot_pose(
             np.array([placed.position_m[0], placed.position_m[1], z_bot]),
@@ -243,18 +340,13 @@ class ScanTrackSession:
 
         # Save cloud.ply, object_card.json, and unitree_g1_pick.json atomically
         self.cloud.export_ply(str(self.session_dir / "cloud.ply"))
-        card_tmp = self.session_dir / "object_card.json.tmp"
+        card_tmp = self.session_dir / f"object_card.json.{os.getpid()}.tmp"
         card_tmp.write_text(json.dumps(self._object_card, indent=2), encoding="utf-8")
         os.replace(card_tmp, self.session_dir / "object_card.json")
         dispatch_unitree_g1_plan(
             self._g1_plan,
             self.session_dir / "unitree_g1_pick.json",
             udp_target=self.g1_udp,
-        )
-        mj_tag = self._mujoco_result["outcome"].upper()
-        self._log(
-            f"PLACED at ws=({placed.position_m[0]*100:.1f}, {placed.position_m[1]*100:.1f}) cm | "
-            f"MuJoCo: {mj_tag} | Unitree G1 ({self._g1_plan['arm']} arm) plan ready!"
         )
 
     def _reset_unlocked(self) -> None:
@@ -267,6 +359,8 @@ class ScanTrackSession:
         self._object_card = None
         self._mujoco_result = None
         self._g1_plan = None
+        self._placed_dirty = False
+        self._logged_90_key = None
 
     def handle_action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Handle interactive commands from Web UI buttons or CLI shortcuts."""
@@ -287,17 +381,58 @@ class ScanTrackSession:
                         self.cal = WorkspaceCalibration.from_table_points(pts)
                         self.cal.save(self.session_dir / "calibration.json")
                         self._reset_unlocked()
+                        self._last_frame_ws = DualHandFrame(
+                            timestamp=raw.timestamp,
+                            right=self._transform_hand_to_ws(raw.right),
+                            left=self._transform_hand_to_ws(raw.left),
+                            mode=raw.mode,
+                            seq=raw.seq,
+                        )
                         self._log("Table plane calibrated from flat right hand (z_table = 0.0 m)!")
 
             elif action in ("trace_toggle", "snapshot", "caliper", "phase"):
-                # Allow immediate phase advancement even if fewer than 5 voxels when clicked manually
-                if action == "phase" and self._last_frame_ws and self._last_frame_ws.right is not None:
-                    if self.relocation.phase == "scanning":
-                        self._enter_carrying_unlocked(self._last_frame_ws.right)
+                right_now = self._last_frame_ws.right if self._last_frame_ws else None
+                if action == "phase" and right_now is not None:
+                    if self.relocation.phase in ("scanning", "placed"):
+                        self._enter_carrying_unlocked(right_now)
                     elif self.relocation.phase == "carrying":
-                        self._finalize_placement_unlocked(self._last_frame_ws.right)
+                        self._finalize_placement_unlocked(right_now)
+                elif action in ("snapshot", "caliper") and right_now is not None and self.relocation.phase in ("scanning", "placed"):
+                    synth_ev = GestureEvent(
+                        raw_sign="idle",
+                        active_sign="fist" if action == "snapshot" else "caliper",
+                        snapshot_5=(action == "snapshot"),
+                        caliper_pinch=(action == "caliper"),
+                    )
+                    self._ingest_tactile_events_unlocked(right_now, synth_ev)
+                    self._refresh_scan_and_match_unlocked()
+                    if self.relocation.phase == "scanning" and self._last_scan.n_voxels >= 3:
+                        xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked()
+                        self.relocation.set_scan_pose(xy_s, h_s, yaw_s)
+                    elif self.relocation.phase == "placed":
+                        self._locked_key = self._last_match.best_key or self._locked_key
+                        ref_obj = self.catalog.get(self._locked_key) if self._locked_key else None
+                        xy_s, h_s, yaw_s = self._estimate_scan_pose_unlocked(ref_override=ref_obj)
+                        placed_est = self.relocation.refresh_placed_from_scan(
+                            xy_s,
+                            h_s,
+                            yaw_s,
+                            n_voxels=self._last_scan.n_voxels,
+                            ref_obj=ref_obj,
+                        )
+                        self._write_placed_outputs_unlocked(placed_est)
+                        self._placed_dirty = False
                 else:
                     self.gestures.queue_command(action)
+                    if (
+                        action == "trace_toggle"
+                        and not self.gestures.manual_trace_enabled
+                        and self.relocation.phase == "placed"
+                        and self._placed_dirty
+                        and self.relocation._current_pose is not None
+                    ):
+                        self._write_placed_outputs_unlocked(self.relocation._current_pose)
+                        self._placed_dirty = False
 
             elif action == "set_mode":
                 new_mode = str(payload.get("mode", "planted"))
@@ -329,6 +464,29 @@ class ScanTrackSession:
         pose = self.relocation._current_pose
         matched_key = self._locked_key or self._last_match.best_key
         matched_obj = self.catalog.get(matched_key) if matched_key else None
+        best_prob = float(self._last_match.probabilities.get(matched_key, 0.0)) if matched_key else 0.0
+        confirmed_90 = bool(
+            matched_obj is not None
+            and self._last_scan.n_voxels >= 10
+            and best_prob > 0.90
+        )
+
+        # Visually carry the 3D point cloud & Convex Hull in-hand during CARRYING
+        pts_vis = pts
+        hull_verts_vis = None if hull is None else hull.vertices
+        if (
+            self.relocation.phase == "carrying"
+            and self.relocation._initial_pose is not None
+            and pose is not None
+        ):
+            T0 = make_se3(self.relocation._initial_pose.rotation, self.relocation._initial_pose.position_m)
+            Tt = make_se3(pose.rotation, pose.position_m)
+            T_carry = Tt @ invert_se3(T0)
+            R_c, t_c = T_carry[:3, :3], T_carry[:3, 3]
+            if len(pts) > 0:
+                pts_vis = (R_c @ pts.T).T + t_c
+            if hull_verts_vis is not None and len(hull_verts_vis) > 0:
+                hull_verts_vis = (R_c @ hull_verts_vis.T).T + t_c
 
         hands_payload: dict[str, Any] = {"right": None, "left": None}
         if self._last_frame_ws is not None:
@@ -341,9 +499,9 @@ class ScanTrackSession:
                     }
 
         hull_payload = None
-        if hull is not None:
+        if hull is not None and hull_verts_vis is not None:
             hull_payload = {
-                "vertices": np.round(hull.vertices, 4).tolist(),
+                "vertices": np.round(hull_verts_vis, 4).tolist(),
                 "faces": hull.faces.tolist(),
                 "volume_cm3": round(hull.volume_m3 * 1e6, 1),
                 "area_cm2": round(hull.area_m2 * 1e4, 1),
@@ -356,9 +514,27 @@ class ScanTrackSession:
                 "key": matched_obj.key,
                 "label": matched_obj.label,
                 "shape": matched_obj.shape,
+                "material": matched_obj.material,
+                "container": bool(matched_obj.container),
+                "sloped_top_m": round(float(matched_obj.sloped_top_m), 4),
+                "mass_g": round(float(matched_obj.mass_kg) * 1000.0, 1),
+                "max_grip_n": round(float(matched_obj.max_grip_n), 1),
                 "extents_m": [round(float(v), 4) for v in ext],
+                "confidence": round(best_prob, 4),
+                "confirmed_90": confirmed_90,
                 "pose": pose.to_dict(),
             }
+
+        raw_fits = self._last_scan.primitive_fit.get("fits", {})
+        prim_fits_payload = {
+            sh: {
+                "dims_m": {dk: round(float(dv), 4) for dk, dv in fd.get("dims_m", {}).items()},
+                "center_xy": [round(float(c), 4) for c in fd.get("center_xy", [0.0, 0.0])],
+                "yaw_rad": round(float(fd.get("yaw_rad", 0.0)), 4),
+                "rms_mm": round(float(fd.get("rms_m", 0.0)) * 1000.0, 2),
+            }
+            for sh, fd in raw_fits.items()
+        }
 
         return {
             "source": self.source_kind,
@@ -383,12 +559,14 @@ class ScanTrackSession:
             "cloud": {
                 "n_raw": self._last_scan.n_raw,
                 "n_voxels": self._last_scan.n_voxels,
-                "points": np.round(pts, 4).tolist(),
+                "points": np.round(pts_vis, 4).tolist(),
                 "height_mm": round(self._last_scan.height_m * 1000.0, 1),
                 "length_mm": round(self._last_scan.length_m * 1000.0, 1),
                 "width_mm": round(self._last_scan.width_m * 1000.0, 1),
                 "calipers_mm": [round(c * 1000.0, 1) for c in self._last_scan.calipers_m],
+                "primitive_best": self._last_scan.primitive_fit.get("best"),
                 "primitive_weights": self._last_scan.primitive_fit.get("weights", {}),
+                "primitive_fits": prim_fits_payload,
             },
             "hull": hull_payload,
             "catalog": {
@@ -404,6 +582,8 @@ class ScanTrackSession:
                 },
                 "best_key": matched_key,
                 "confident": self._last_match.confident,
+                "confirmed_90": confirmed_90,
+                "best_probability": round(best_prob, 4),
                 "probabilities": self._last_match.probabilities,
                 "advice": self._last_match.advice,
             },

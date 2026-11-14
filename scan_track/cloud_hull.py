@@ -379,6 +379,114 @@ def fit_table_primitives(P: np.ndarray, z_table: float, obb: dict[str, Any]) -> 
     return {"best": best, "weights": weights, "sigma_eff_m": round(sigma_eff, 5), "fits": fits}
 
 
+def fit_reference_pose_xy_yaw(
+    points_m: np.ndarray,
+    shape: str,
+    dims: dict[str, float],
+    z_table: float,
+    init_xy: np.ndarray,
+    init_yaw: float = 0.0,
+) -> tuple[np.ndarray, float]:
+    """Robustly align a known catalog template's `(cx, cy, yaw)` to `points_m` on `z_table`.
+
+    Uses Cauchy IRLS on the exact surface SDF so stray non-touching fingers in a 5-finger
+    snapshot cannot pull the rendered 3D structure off the true touched object surface.
+    """
+    P = np.asarray(points_m, dtype=float)
+    base_xy = np.asarray(init_xy, dtype=float)[:2].copy()
+    base_yaw = float(init_yaw)
+    if len(P) < 6:
+        return base_xy, base_yaw
+
+    med_xy = np.median(P[:, :2], axis=0)
+    sigma = 0.0045  # 4.5 mm Cauchy scale for skin + sensor tolerance
+
+    def eval_sdf(st: np.ndarray) -> np.ndarray:
+        if shape == "sphere":
+            return _sdf_table_primitive("sphere", np.array([st[0], st[1], float(dims["radius"])]), P, z_table)
+        if shape == "cylinder":
+            return _sdf_table_primitive(
+                "cylinder",
+                np.array([st[0], st[1], float(dims["radius"]), float(dims["height"])]),
+                P,
+                z_table,
+            )
+        return _sdf_table_primitive(
+            "box",
+            np.array([st[0], st[1], st[2], float(dims["x"]), float(dims["y"]), float(dims["z"])]),
+            P,
+            z_table,
+        )
+
+    is_box = shape == "box"
+    k = 3 if is_box else 2
+    lo = np.array([med_xy[0] - 0.12, med_xy[1] - 0.12, -math.pi])[:k]
+    hi = np.array([med_xy[0] + 0.12, med_xy[1] + 0.12, math.pi])[:k]
+
+    seeds: list[np.ndarray] = []
+    if is_box:
+        seeds.append(np.array([med_xy[0], med_xy[1], base_yaw]))
+        seeds.append(np.array([base_xy[0], base_xy[1], base_yaw]))
+        seeds.append(np.array([med_xy[0], med_xy[1], base_yaw + 0.25 * math.pi]))
+    else:
+        seeds.append(med_xy.copy())
+        seeds.append(base_xy.copy())
+
+    init_state = np.array([base_xy[0], base_xy[1], base_yaw])[:k]
+    r_init = eval_sdf(init_state)
+    best_dev = float(np.sum(np.log1p((r_init / sigma) ** 2)))
+    best_st = init_state.copy()
+
+    eps = 1e-5
+    for s0 in seeds:
+        st = np.clip(s0.astype(float), lo + 1e-5, hi - 1e-5)
+        lam = 1e-2
+        for _ in range(14):
+            r = eval_sdf(st)
+            z = r / sigma
+            dev = float(np.sum(np.log1p(z * z)))
+            w_irls = 1.0 / (1.0 + z * z)
+
+            J = np.empty((len(P), k), dtype=float)
+            for j in range(k):
+                step = 1e-4 if (is_box and j == 2) else eps
+                stp = st.copy()
+                stp[j] += step
+                J[:, j] = (eval_sdf(stp) - r) / step
+
+            JW = J * w_irls[:, None]
+            H_mat = JW.T @ J + lam * np.eye(k)
+            g_vec = JW.T @ r
+            try:
+                dx = -np.linalg.solve(H_mat, g_vec)
+            except np.linalg.LinAlgError:
+                break
+
+            st_new = np.clip(st + dx, lo, hi)
+            if is_box:
+                st_new[2] = math.atan2(math.sin(st_new[2]), math.cos(st_new[2]))
+            r_new = eval_sdf(st_new)
+            dev_new = float(np.sum(np.log1p((r_new / sigma) ** 2)))
+            if dev_new < dev:
+                st = st_new
+                lam = max(lam * 0.5, 1e-4)
+                if abs(dev - dev_new) < 1e-4:
+                    break
+            else:
+                lam *= 4.0
+                if lam > 1e2:
+                    break
+
+        r_fin = eval_sdf(st)
+        dev_fin = float(np.sum(np.log1p((r_fin / sigma) ** 2)))
+        if dev_fin < best_dev:
+            best_dev = dev_fin
+            best_st = st.copy()
+
+    yaw_out = math.atan2(math.sin(best_st[2]), math.cos(best_st[2])) if is_box else base_yaw
+    return best_st[:2].copy(), float(yaw_out)
+
+
 # --------------------------------------------------------------------------- Cloud Accumulator
 
 @dataclass
@@ -455,6 +563,38 @@ class TactileCloudBuilder:
         if 0.010 <= width_m <= 0.250:
             self.calipers_m.append(round(float(width_m), 4))
             self._dirty = True
+
+    def transform_planar(
+        self,
+        src_xy: np.ndarray,
+        src_yaw: float,
+        dst_xy: np.ndarray,
+        dst_yaw: float,
+    ) -> None:
+        """Rigidly relocate accumulated cloud on the table from (src_xy, src_yaw) to (dst_xy, dst_yaw)."""
+        if not self._voxels:
+            return
+        d_yaw = float(dst_yaw - src_yaw)
+        c, s = math.cos(d_yaw), math.sin(d_yaw)
+        R2 = np.array([[c, -s], [s, c]], dtype=float)
+        src = np.asarray(src_xy, dtype=float)[:2]
+        dst = np.asarray(dst_xy, dtype=float)[:2]
+
+        new_voxels: dict[tuple[int, int, int], tuple[np.ndarray, int]] = {}
+        for pt, cnt in self._voxels.values():
+            p_new = pt.copy()
+            p_new[:2] = dst + R2 @ (pt[:2] - src)
+            key = tuple(int(math.floor(coord / self.voxel_m)) for coord in p_new)
+            if key in new_voxels:
+                prev_pt, prev_cnt = new_voxels[key]
+                tot = prev_cnt + cnt
+                new_voxels[key] = ((prev_pt * prev_cnt + p_new * cnt) / tot, tot)
+            else:
+                new_voxels[key] = (p_new, cnt)
+
+        self._voxels = new_voxels
+        self._dirty = True
+        self._cached_summary = None
 
     def points(self) -> np.ndarray:
         if not self._voxels:

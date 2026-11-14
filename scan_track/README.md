@@ -58,6 +58,11 @@ Opens `http://127.0.0.1:8765` (100% offline 3D viewer—works even without inter
 | **✌️ Peace Sign** *(index+middle straight, ring+pinky curled — tap)* | **`Space` / `P`** | **1st tap:** `LOCK_GRASP` (pick up & move object)<br>**2nd tap:** `PLACED` (snap to table, verify in MuJoCo, emit Unitree G1 pick plan) |
 | — | **`B`** | Calibrate flat table plane (`z_table = 0`) from current right hand |
 | — | **`R`** | Reset scan for next object |
+| — | **Right-Drag / `Shift`+Drag / `WASD` / Arrows** | Move 3D visual map across the horizontal **X–Z table plane** |
+| — | **`Alt`+Drag / `Q` & `E`** | Adjust vertical view height |
+| — | **`F`** *(or **Follow** toggle)* | Center 3D camera onto active object / live gloved hands (handles any Coil Pro offset) |
+| — | **`O`** *(or **Object: Visible / See-Through**)* | Toggle predefined 3D object between solid and see-through (to inspect the 3D Convex Hull) |
+| — | **`H` / `V` / `0`** | Cycle Convex Hull visibility / toggle tactile points / reset camera view |
 
 ---
 

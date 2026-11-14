@@ -1,6 +1,7 @@
 """Unit and end-to-end integration tests for `scan_track`."""
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import sys
@@ -22,9 +23,11 @@ from scan_track.cloud_hull import (
     TactileCloudBuilder,
     _incremental_hull_3d_numpy,
     compute_convex_hull_3d,
+    fit_reference_pose_xy_yaw,
     minimum_area_obb_2d,
 )
 from scan_track.gestures import GestureController, classify_left_hand_sign
+from scan_track.live_server import INDEX_HTML
 from scan_track.pipeline import ScanTrackSession
 from scan_track.relocation import RelocationTracker, make_se3, upright_se3
 from scan_track.rokoko_stream import SyntheticExplorationStream, parse_rokoko_frame
@@ -238,6 +241,154 @@ class RelocationAndEndToEndTests(unittest.TestCase):
                 self.assertTrue((Path(snap["session_dir"]) / "unitree_g1_pick.json").exists())
                 self.assertTrue((Path(snap["session_dir"]) / "object_card.json").exists())
                 self.assertTrue((Path(snap["session_dir"]) / "cloud.ply").exists())
+
+    def test_post_placement_actions_and_repeated_relocation_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = ScanTrackSession(
+                source="synthetic",
+                synthetic_object="redbull",
+                sessions_root=tmp,
+            )
+            assert sess.synthetic is not None
+            sess.synthetic.auto_cycle = False
+
+            dt = 1.0 / 30.0
+            snap = {}
+            for _ in range(int(13.5 / dt)):
+                snap = sess.tick(dt=dt)
+            self.assertEqual(snap["phase"], "placed")
+
+            placed1_xy = np.array([
+                snap["tracked_object"]["pose"]["x_m"],
+                snap["tracked_object"]["pose"]["y_m"],
+            ])
+            # Cloud & Convex Hull must have moved onto placed1_xy alongside the object
+            cloud_pts1 = np.asarray(snap["cloud"]["points"])
+            np.testing.assert_allclose(cloud_pts1[:, :2].mean(axis=0), placed1_xy, atol=0.025)
+
+            # 1. Position right hand around placed1_xy; Caliper & Snapshot actions in PLACED must NOT be blocked
+            assert sess._last_frame_ws is not None and sess._last_frame_ws.right is not None
+            r0 = sess._last_frame_ws.right
+            r0.tips_pad["thumb"] = np.array([placed1_xy[0] - 0.0265, placed1_xy[1], 0.075])
+            for idx_f, fname in enumerate(("index", "middle", "ring", "pinky")):
+                r0.tips_pad[fname] = np.array([placed1_xy[0] + 0.0265, placed1_xy[1], 0.095 - 0.015 * idx_f])
+
+            n_cal_before = len(snap["cloud"]["calipers_mm"])
+            snap = sess.handle_action("caliper")
+            self.assertEqual(snap["phase"], "placed")
+            self.assertEqual(len(snap["cloud"]["calipers_mm"]), n_cal_before + 1)
+
+            voxels_before = snap["cloud"]["n_voxels"]
+            snap = sess.handle_action("snapshot")
+            self.assertEqual(snap["phase"], "placed")
+            self.assertGreater(snap["cloud"]["n_voxels"], voxels_before)
+
+            # 2. Re-picking in PLACED (`phase` / Peace sign) must enter CARRYING from placed1_xy
+            snap = sess.handle_action("phase")
+            self.assertEqual(snap["phase"], "carrying")
+
+            # Shift right wrist by (+0.14, -0.08) m and place down at spot #2
+            assert sess._last_frame_ws is not None and sess._last_frame_ws.right is not None
+            delta_xy = np.array([0.14, -0.08, 0.0])
+            sess._last_frame_ws.right.wrist_pos = sess._last_frame_ws.right.wrist_pos + delta_xy
+            for k in sess._last_frame_ws.right.tips_pad:
+                sess._last_frame_ws.right.tips_pad[k] = sess._last_frame_ws.right.tips_pad[k] + delta_xy
+
+            snap = sess.handle_action("phase")
+            self.assertEqual(snap["phase"], "placed")
+            placed2_xy = np.array([
+                snap["tracked_object"]["pose"]["x_m"],
+                snap["tracked_object"]["pose"]["y_m"],
+            ])
+            expected2_xy = placed1_xy + delta_xy[:2]
+            np.testing.assert_allclose(placed2_xy, expected2_xy, atol=0.015)
+
+            # Cloud and saved Unitree G1 plan must reflect spot #2
+            cloud_pts2 = np.asarray(snap["cloud"]["points"])
+            np.testing.assert_allclose(cloud_pts2[:, :2].mean(axis=0), placed2_xy, atol=0.025)
+
+            # 3. Also verify Left-Hand Peace gesture in tick() re-enters CARRYING from PLACED
+            sess.synthetic.manual_gesture = "idle"
+            for _ in range(30):  # clear 0.80s cooldown
+                snap = sess.tick(dt=dt)
+            self.assertEqual(snap["phase"], "placed")
+
+            sess.synthetic.manual_gesture = "peace"
+            for _ in range(12):  # hold > 0.25s debounce + settle
+                snap = sess.tick(dt=dt)
+            self.assertEqual(snap["phase"], "carrying")
+
+            sess.synthetic.manual_gesture = "idle"
+            for _ in range(30):  # clear 0.80s cooldown
+                snap = sess.tick(dt=dt)
+            sess.synthetic.manual_gesture = "peace"
+            for _ in range(12):
+                snap = sess.tick(dt=dt)
+            self.assertEqual(snap["phase"], "placed")
+            sess.close()
+
+    def test_reference_pose_fit_ignores_stray_snapshot_fingers_at_coil_offset(self):
+        # Model real Coil Pro offset (-0.63 m, +0.19 m) with a Red Bull rim trace + 5 stray outer fingers
+        true_xy = np.array([-0.629, 0.189])
+        redbull = OBJECTS["redbull"]
+        R_can = float(redbull.dims["radius"])
+        angles = np.linspace(0.0, 2.0 * math.pi, 40, endpoint=False)
+        rim_pts = np.column_stack([
+            true_xy[0] + R_can * np.cos(angles),
+            true_xy[1] + R_can * np.sin(angles),
+            np.full_like(angles, 0.118),
+        ])
+        stray_fingers = np.array([
+            [-0.703, 0.188, 0.087],
+            [-0.696, 0.194, 0.081],
+            [-0.690, 0.178, 0.100],
+            [-0.680, 0.182, 0.106],
+            [-0.650, 0.117, 0.087],
+        ])
+        pts = np.vstack([rim_pts, stray_fingers])
+        obb = minimum_area_obb_2d(pts[:, :2])
+        raw_err_mm = float(np.linalg.norm(obb["center_xy"] - true_xy)) * 1000.0
+        self.assertGreater(raw_err_mm, 14.0)
+
+        fitted_xy, _ = fit_reference_pose_xy_yaw(
+            pts, redbull.shape, redbull.dims, z_table=0.0, init_xy=obb["center_xy"], init_yaw=obb["yaw_rad"]
+        )
+        fit_err_mm = float(np.linalg.norm(fitted_xy - true_xy)) * 1000.0
+        self.assertLess(fit_err_mm, 2.5)
+
+    def test_confirmed_90_metadata_and_movable_dashboard_ui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for key in ("redbull", "profeel", "wood_sphere"):
+                sess = ScanTrackSession(source="synthetic", synthetic_object=key, sessions_root=tmp)
+                assert sess.synthetic is not None
+                sess.synthetic.auto_cycle = False
+                dt = 1.0 / 30.0
+                snap = {}
+                # Run through 7.5 s of scanning (still in `scanning` phase before 8.2 s LOCK_GRASP!)
+                for _ in range(int(7.5 / dt)):
+                    snap = sess.tick(dt=dt)
+                sess.close()
+
+                self.assertEqual(snap["phase"], "scanning")
+                self.assertTrue(snap["catalog"]["confirmed_90"], msg=f"{key} should exceed 90% in scanning")
+                self.assertIsNotNone(snap["tracked_object"])
+                tobj = snap["tracked_object"]
+                self.assertTrue(tobj["confirmed_90"])
+                self.assertGreater(tobj["confidence"], 0.90)
+                # Confirmed structure in scanning must sit flush on z_table = 0.0
+                self.assertAlmostEqual(tobj["pose"]["z_bottom_m"], 0.0, places=4)
+                # Entire state snapshot must serialize cleanly to JSON for /api/state
+                encoded = json.dumps(snap)
+                self.assertGreater(len(encoded), 200)
+
+        self.assertIn("3D Space / X-Z Plane", INDEX_HTML)
+        self.assertIn("renderConfirmedStructure", INDEX_HTML)
+        self.assertIn("centerOnActiveScene", INDEX_HTML)
+        self.assertIn("setObjectVisMode", INDEX_HTML)
+        self.assertIn("Object: See-Through", INDEX_HTML)
+        self.assertNotIn('id="btn-drag-mode"', INDEX_HTML)
+        self.assertNotIn('resetCameraView()"', INDEX_HTML)
+        self.assertNotIn('class="primary" id="btn-phase"', INDEX_HTML)
 
 
 if __name__ == "__main__":

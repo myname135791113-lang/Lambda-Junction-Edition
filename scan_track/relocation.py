@@ -121,24 +121,64 @@ class RelocationTracker:
         height_m: float = 0.10,
         yaw_rad: float = 0.0,
     ) -> ObjectPoseEstimate:
-        """Freeze `T_hand_obj` at the moment the user grasps the scanned object to pick it up."""
-        if self._initial_pose is None:
+        """Freeze `T_hand_obj` at the moment the user grasps the object (from scan OR prior placement)."""
+        base_pose = self._current_pose if self._current_pose is not None else self._initial_pose
+        if base_pose is None:
             xy = np.zeros(2) if fallback_xy is None else fallback_xy
-            self.set_scan_pose(xy, height_m, yaw_rad)
-        assert self._initial_pose is not None
+            base_pose = self.set_scan_pose(xy, height_m, yaw_rad)
+        self._initial_pose = base_pose
 
-        T_ws_obj0 = make_se3(self._initial_pose.rotation, self._initial_pose.position_m)
+        T_ws_obj0 = make_se3(base_pose.rotation, base_pose.position_m)
         self._T_hand_obj = invert_se3(T_ws_hand) @ T_ws_obj0
         self.phase = "carrying"
         self._current_pose = ObjectPoseEstimate(
             phase="carrying",
-            position_m=self._initial_pose.position_m.copy(),
-            rotation=self._initial_pose.rotation.copy(),
-            yaw_rad=self._initial_pose.yaw_rad,
-            resting_height_m=self._initial_pose.resting_height_m,
-            upright=True,
+            position_m=base_pose.position_m.copy(),
+            rotation=base_pose.rotation.copy(),
+            yaw_rad=base_pose.yaw_rad,
+            resting_height_m=base_pose.resting_height_m,
+            upright=base_pose.upright,
         )
         return self._current_pose
+
+    def refresh_placed_from_scan(
+        self,
+        center_xy: np.ndarray,
+        height_m: float,
+        yaw_rad: float,
+        *,
+        n_voxels: int,
+        ref_obj: RefObject | None = None,
+    ) -> ObjectPoseEstimate:
+        """Update resting pose in `placed` phase when additional tactile points refine the object."""
+        prev = self._current_pose
+        upright = True if prev is None else prev.upright
+        if ref_obj is not None:
+            ext = ref_obj.extents()
+            h_rest = float(ext[2]) if (upright or ref_obj.shape == "sphere") else float(min(ext[:2]))
+        else:
+            h_rest = max(height_m, 0.01 if prev is None else prev.resting_height_m)
+
+        if prev is None:
+            xy_use = np.asarray(center_xy, dtype=float)[:2]
+            yaw_use = float(yaw_rad)
+        else:
+            xy_use = prev.position_m[:2].copy()
+            yaw_use = prev.yaw_rad
+
+        z_c = self.z_table + 0.5 * h_rest
+        T_fin = upright_se3(xy_use, z_c, yaw_use)
+        est = ObjectPoseEstimate(
+            phase="placed",
+            position_m=T_fin[:3, 3].copy(),
+            rotation=T_fin[:3, :3].copy(),
+            yaw_rad=yaw_use,
+            resting_height_m=h_rest,
+            upright=upright,
+            cage_rms_mm=0.0 if prev is None else prev.cage_rms_mm,
+        )
+        self._current_pose = est
+        return est
 
     def update_carry(self, T_ws_hand: np.ndarray) -> ObjectPoseEstimate | None:
         """Stream live 6-DoF carried object pose while in mid-air."""
@@ -223,12 +263,20 @@ def _refine_pose_with_finger_cage(
     z_table: float,
 ) -> tuple[np.ndarray, float, float]:
     """Regularized Gauss-Newton fit of `(x, y, yaw)` to final finger-pad contacts on `ref_obj`."""
-    # Only use fingers within plausible reach of the placed object (ignore tucked/floating pinky)
+    # Only refine when >= 3 fingers are genuinely enclosing the placed object on opposing sides.
+    # If the user already opened their hand or held it from one side only, trust rigid wrist carry!
     dists_xy = np.linalg.norm(pads_ws[:, :2] - xy_prior, axis=1)
-    max_r = 0.5 * float(max(ref_obj.extents()[:2])) + 0.045
+    max_r = 0.5 * float(max(ref_obj.extents()[:2])) + 0.025
     inliers = pads_ws[dists_xy <= max_r]
     if len(inliers) < 3:
-        inliers = pads_ws
+        return xy_prior.copy(), float(yaw_prior), 0.0
+
+    rel = inliers[:, :2] - xy_prior
+    angs = np.sort(np.arctan2(rel[:, 1], rel[:, 0]))
+    gaps = np.diff(np.append(angs, angs[0] + 2.0 * math.pi))
+    covered_arc = 2.0 * math.pi - float(np.max(gaps))
+    if covered_arc < math.radians(100.0):
+        return xy_prior.copy(), float(yaw_prior), 0.0
 
     x_state = np.array([float(xy_prior[0]), float(xy_prior[1]), float(yaw_prior)], dtype=float)
     prior = x_state.copy()

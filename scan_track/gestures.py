@@ -134,7 +134,7 @@ class GestureController:
         held = (now - self._candidate_since) >= self.hold_sec
         active = raw if (raw == "pinch" or held) else "idle"
 
-        if raw in ("idle", "pinch", "no_left_hand"):
+        if raw != self._latched_discrete:
             self._latched_discrete = "idle"
 
         fire_snap = self._queued_snapshot_5
