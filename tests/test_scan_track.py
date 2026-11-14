@@ -933,5 +933,47 @@ class RelocationAndEndToEndTests(unittest.TestCase):
         self.assertIn("const isConfirmed90 = Boolean(tracked && tracked.confirmed_90 && conf > 0.90);", INDEX_HTML)
 
 
+class UndoBehaviourTests(unittest.TestCase):
+    def _session(self, tmp):
+        sess = ScanTrackSession(source="synthetic", synthetic_object="redbull", sessions_root=tmp)
+        assert sess.synthetic is not None
+        sess.synthetic.auto_cycle = False
+        return sess
+
+    def _tick_until(self, sess, phase, limit_s=20.0):
+        dt = 1.0 / 30.0
+        snap = {}
+        for _ in range(int(limit_s / dt)):
+            snap = sess.tick(dt=dt)
+            if sess.relocation.phase == phase:
+                return snap
+        self.fail(f"never reached phase {phase!r}")
+
+    def test_undo_is_blocked_while_carrying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = self._session(tmp)
+            self._tick_until(sess, "carrying")
+            depth = len(sess._undo_stack)
+            snap = sess.handle_action("undo")
+            sess.close()
+            self.assertEqual(snap["phase"], "carrying")
+            self.assertEqual(len(sess._undo_stack), depth)
+
+    def test_undo_place_returns_to_state_before_pickup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = self._session(tmp)
+            self._tick_until(sess, "carrying")
+            # State right after the pick-up gesture started: the stack top is the pre-pickup snapshot.
+            before = sess._undo_stack[-1]
+            before_phase = before["relocation"].phase
+            before_voxels = before["cloud"].summarize().n_voxels
+            self._tick_until(sess, "placed")
+            snap = sess.handle_action("undo")
+            sess.close()
+            self.assertNotEqual(snap["phase"], "carrying")
+            self.assertEqual(snap["phase"], before_phase)
+            self.assertEqual(sess._last_scan.n_voxels, before_voxels)
+
+
 if __name__ == "__main__":
     unittest.main()

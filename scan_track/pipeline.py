@@ -252,10 +252,20 @@ class ScanTrackSession:
             self._undo_stack.pop(0)
 
     def _undo_unlocked(self) -> str:
-        if not self._undo_stack:
+        if self.relocation.phase == "carrying":
+            msg = "Undo unavailable while carrying: place the object down first."
+            self._log(msg)
+            return msg
+        # Snapshots taken in the "carrying" phase (pushed when placing) are never restored:
+        # undoing a placement must go back to the state before the pick-up, so skip past them.
+        idx = len(self._undo_stack) - 1
+        while idx >= 0 and self._undo_stack[idx]["relocation"].phase == "carrying":
+            idx -= 1
+        if idx < 0:
             self._log("Undo: nothing to undo.")
             return "Nothing to undo."
-        st = self._undo_stack.pop()
+        st = self._undo_stack[idx]
+        del self._undo_stack[idx:]
         self.cloud = st["cloud"]
         self.relocation = st["relocation"]
         self._locked_key = st["locked_key"]
