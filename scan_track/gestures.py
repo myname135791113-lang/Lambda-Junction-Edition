@@ -35,10 +35,16 @@ class GestureEvent:
     phase_toggle: bool = False        # True on the single rising-edge frame of a Peace trigger
     pinch_dist_mm: float = 0.0
     finger_extensions: dict[str, float] | None = None
+    tip_speed_mps: float = 0.0
 
 
-def classify_left_hand_sign(hand: HandPose | None) -> tuple[str, float, dict[str, float]]:
+def classify_left_hand_sign(
+    hand: HandPose | None,
+    *,
+    prev_sign: str = "idle",
+) -> tuple[str, float, dict[str, float]]:
     """Classify static left-hand posture from scale-normalized 3D tip-to-wrist geometry."""
+    del prev_sign
     if hand is None:
         return "no_left_hand", 0.0, {}
 
@@ -52,8 +58,8 @@ def classify_left_hand_sign(hand: HandPose | None) -> tuple[str, float, dict[str
     pinch_pnk_m = float(np.linalg.norm(hand.tips_bone["thumb"] - hand.tips_bone["pinky"]))
 
     # Forward finger extension along the hand's forward axis (+col 0 of wrist_rot) relative to palm_len:
-    #   - Straight extended finger: tip is ~2.1 - 2.5x palm_len ahead of wrist (~1.1 - 1.4x ahead of MCP)
-    #   - Curled finger in fist/peace: tip curls back to palm, so forward projection is ~0.4 - 1.15x palm_len!
+    #   - Straight extended finger: tip is ~1.75 - 2.5x palm_len ahead of wrist
+    #   - Curled finger on real Rokoko Smartgloves II: tip sits at ~0.95 - 1.40x palm_len
     fwd_axis = hand.wrist_rot[:, 0]
     ext: dict[str, float] = {}
     for f in ("thumb", "index", "middle", "ring", "pinky"):
@@ -67,8 +73,7 @@ def classify_left_hand_sign(hand: HandPose | None) -> tuple[str, float, dict[str
     if pinch_pnk_m < 0.028 * scale and (is_straight["index"] or is_straight["middle"]):
         return "caliper", round(pinch_idx_m * 1000.0, 1), ext
 
-    # 2. 👌 OK-Pinch: thumb + index touching (< 28 mm) AND at least 2 of (middle, ring, pinky) extended!
-    #    Requiring extended outer fingers prevents any confusion with a closed fist.
+    # 2. 👌 OK-Pinch: thumb + index touching (< 28 mm bone-to-bone) AND >= 2 outer fingers extended
     outer_open = sum(1 for f in ("middle", "ring", "pinky") if not is_curled[f])
     if pinch_idx_m < 0.028 * scale and outer_open >= 2:
         return "pinch", round(pinch_idx_m * 1000.0, 1), ext
@@ -87,8 +92,15 @@ def classify_left_hand_sign(hand: HandPose | None) -> tuple[str, float, dict[str
 class GestureController:
     """Debounces raw left-hand classifications and merges keyboard/UI button overrides."""
 
-    def __init__(self, *, hold_sec: float = 0.12, cooldown_sec: float = 0.65):
+    def __init__(
+        self,
+        *,
+        hold_sec: float = 0.12,
+        pinch_hold_sec: float | None = None,
+        cooldown_sec: float = 0.65,
+    ):
         self.hold_sec = hold_sec
+        self.pinch_hold_sec = 0.0 if pinch_hold_sec is None else pinch_hold_sec
         self.cooldown_sec = cooldown_sec
         self._candidate: str = "idle"
         self._candidate_since: float = 0.0
@@ -131,8 +143,9 @@ class GestureController:
             self._candidate = raw
             self._candidate_since = now
 
-        held = (now - self._candidate_since) >= self.hold_sec
-        active = raw if (raw == "pinch" or held) else "idle"
+        req_hold = self.pinch_hold_sec if raw == "pinch" else self.hold_sec
+        held = (now - self._candidate_since) >= req_hold
+        active = raw if held else "idle"
 
         if raw != self._latched_discrete:
             self._latched_discrete = "idle"
