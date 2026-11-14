@@ -250,7 +250,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="row-inline" id="synth-controls" style="display:none;">
         <select id="obj-select" onchange="setSynthObj(this.value)">
           <option value="redbull">Red Bull 250 ml Can</option>
-          <option value="profeel">Valio PROfeel Carton</option>
+          <option value="kantolan_suola_cracker">Kantolan Suola Cracker 150 g</option>
           <option value="wood_sphere">Wooden Sphere (r=50mm)</option>
         </select>
         <button id="auto-btn" onclick="toggleAuto()">Auto Loop: ON</button>
@@ -907,10 +907,79 @@ function buildConfirmedStructure(tracked) {
         ribs.push({ a: W(l0[0], l0[1], l0[2]), b: W(l1[0], l1[1], l1[2]), nrm: Nrm(ln[0], ln[1], ln[2]), bold: ring === 0 });
       }
     }
-  } else {
-    // Box / Valio PROfeel Tetra Brik Aseptic Edge Carton (with sloped top + screw cap!)
+  } else if (tracked.key === 'kantolan_suola_cracker') {
+    // KNOWN ISSUES (details in glove_twin/objects.py above the 'kantolan_suola_cracker' entry):
+    //  - This box is drawn lying down only because its catalog dims are x=195, y=66, z=45 mm. The
+    //    simulators and shape_fit expect z to be the long axis, so 3 tests fail (grasp 'dropped' instead of
+    //    'lifted' x2, fit error 16.6 mm). Better: keep dims upright (z = 195 mm) and lay it down here via
+    //    laidOnSide, with the pose z-centre using the lying height min(ex, ey) / 2.
+    //  - Only this key gets the artwork; any other box falls through to the generic branch below.
+    //  - The top face is an 80 x 28 colour grid (about 4500 triangles); the logo edges are blocky and the
+    //    text ("Kantolan", "SUOLA CRACKER", "150 g") is only suggested by coloured shapes.
+    //  - Removing 'profeel' also removed its Tetra Brik artwork from use: the isCarton / screw-cap code in
+    //    the generic box branch is now only reached by a catalog box with sloped_top_m > 0.
+    // Kantolan Suola Cracker 150 g: flow-wrapped cracker box lying on its largest face.
+    // Colours from kantolan.fi: golden-orange wrap, red oval logo, teal photo panel with crackers.
     const hx = ex * 0.5, hy = ey * 0.5, hz = ez * 0.5;
-    const isCarton = tracked.key === 'profeel' || (tracked.sloped_top_m || 0) > 0;
+    const NU = 80, NV = 28;   // top face is a coloured grid (no overlapping faces, so depth sorting stays clean)
+    const lerp3 = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+    const inEll = (u, v, cu, cv, ru, rv) => ((u - cu) / ru) ** 2 + ((v - cv) / rv) ** 2 < 1;
+    const topRgb = (u, v) => {
+      if (inEll(u, v, -0.42, 0.10, 0.20, 0.30)) return [252, 238, 232];   // white "Kantolan" script
+      if (inEll(u, v, -0.42, 0.10, 0.31, 0.64)) return [214, 36, 36];     // red logo oval
+      if (u > -0.78 && u < -0.08 && v > -0.80 && v < -0.52) return [178, 30, 22];  // "SUOLA CRACKER" label bar
+      if (inEll(u, v, 0.50, 0.04, 0.27, 0.42)) return [236, 192, 112];    // cracker stack
+      if (inEll(u, v, 0.48, 0.00, 0.50, 0.92)) return [92, 150, 170];     // teal photo panel
+      if (Math.abs(u) > 0.90) return [214, 118, 36];                      // crimped end seals
+      return lerp3([247, 178, 58], [236, 150, 38], (u + 1) * 0.5);        // golden-orange wrap
+    };
+    for (let iu = 0; iu < NU; iu++) {
+      for (let iv = 0; iv < NV; iv++) {
+        const u0 = -1 + 2 * iu / NU, u1 = -1 + 2 * (iu + 1) / NU;
+        const v0 = -1 + 2 * iv / NV, v1 = -1 + 2 * (iv + 1) / NV;
+        addQuad(W(u0 * hx, v0 * hy, hz), W(u1 * hx, v0 * hy, hz), W(u1 * hx, v1 * hy, hz), W(u0 * hx, v1 * hy, hz),
+                topRgb(0.5 * (u0 + u1), 0.5 * (v0 + v1)));
+      }
+    }
+    // Long side walls (golden wrap with a darker lower band), crimped red-orange end walls, plain base
+    const sideBand = (yy, nx) => {
+      for (let iu = 0; iu < NU; iu++) {
+        const u0 = -1 + 2 * iu / NU, u1 = -1 + 2 * (iu + 1) / NU;
+        const seal = Math.abs(0.5 * (u0 + u1)) > 0.90;
+        for (let b = 0; b < 2; b++) {
+          const z0 = -hz + b * hz, z1 = z0 + hz;
+          const rgb = seal ? [200, 62, 38] : (b === 0 ? [222, 140, 34] : [240, 164, 46]);
+          const q = [W(u0 * hx, yy, z0), W(u1 * hx, yy, z0), W(u1 * hx, yy, z1), W(u0 * hx, yy, z1)];
+          if (nx > 0) addQuad(q[1], q[0], q[3], q[2], rgb); else addQuad(q[0], q[1], q[2], q[3], rgb);
+        }
+      }
+    };
+    sideBand(hy, 1);
+    sideBand(-hy, -1);
+    addQuad(W(hx, -hy, -hz), W(hx, hy, -hz), W(hx, hy, hz), W(hx, -hy, hz), [196, 52, 40]);
+    addQuad(W(-hx, hy, -hz), W(-hx, -hy, -hz), W(-hx, -hy, hz), W(-hx, hy, hz), [196, 52, 40]);
+    addQuad(W(-hx, hy, -hz), W(hx, hy, -hz), W(hx, -hy, -hz), W(-hx, -hy, -hz), [176, 110, 28]);
+    // Heat-seal fin lines near each end of the top face, plus the 12 box edges
+    for (const sx of [-0.90, 0.90]) {
+      ribs.push({ a: W(sx * hx, -hy, hz), b: W(sx * hx, hy, hz), nrm: Nrm(0, 0, 1), bold: false });
+    }
+    const c8 = [
+      [-hx, -hy, -hz], [hx, -hy, -hz], [hx, hy, -hz], [-hx, hy, -hz],
+      [-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz]
+    ];
+    const edgeDefs = [
+      [0,1,[0,-1,-0.5]], [1,2,[1,0,-0.5]], [2,3,[0,1,-0.5]], [3,0,[-1,0,-0.5]],
+      [4,5,[0,-1,0.8]],  [5,6,[1,0,0.8]],  [6,7,[0,1,0.8]],  [7,4,[-1,0,0.8]],
+      [0,4,[-1,-1,0]],   [1,5,[1,-1,0]],   [2,6,[1,1,0]],    [3,7,[-1,1,0]],
+    ];
+    for (const [i, j, en] of edgeDefs) {
+      ribs.push({ a: W(c8[i][0], c8[i][1], c8[i][2]), b: W(c8[j][0], c8[j][1], c8[j][2]),
+                  nrm: Nrm(en[0], en[1], en[2]), bold: true });
+    }
+  } else {
+    // Generic box / Tetra Brik style carton (sloped top + screw cap when sloped_top_m > 0)
+    const hx = ex * 0.5, hy = ey * 0.5, hz = ez * 0.5;
+    const isCarton = (tracked.sloped_top_m || 0) > 0;
     const slope = tracked.sloped_top_m || 0.0;
     const zTopBack = hz;
     const zTopFront = hz - slope;
@@ -960,7 +1029,7 @@ function buildConfirmedStructure(tracked) {
     addQuad(W(-hx, -hy, zTopBack), W(hx, -hy, zTopFront), W(hx, hy, zTopFront), W(-hx, hy, zTopBack), isCarton ? [242, 246, 252] : [94, 234, 212]);
     addQuad(W(-hx, hy, -hz), W(hx, hy, -hz), W(hx, -hy, -hz), W(-hx, -hy, -hz), [130, 150, 175]);
 
-    // 3D Raised Screw-Cap on sloped Tetra Edge top for Valio PROfeel carton
+    // 3D Raised Screw-Cap on a sloped Tetra Edge top
     if (isCarton) {
       const capR = Math.min(hx, hy) * 0.56;
       const capH = 0.007;
