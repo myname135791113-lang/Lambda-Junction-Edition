@@ -214,7 +214,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <div class="hud-bottom">
       <b>Move X-Z Map:</b> Right-Drag / Shift+Drag / <b>[WASD / Arrows]</b> &nbsp;|&nbsp; <b>Orbit:</b> Left-Drag &nbsp;|&nbsp; <b>Height:</b> Alt+Drag / <b>[Q/E]</b> &nbsp;|&nbsp; <b>[F]</b> Center &nbsp;|&nbsp; <b>[O/H/V]</b> Object / Hull / Points<br/>
-      <b>Scan Keys:</b> <b>[T]</b> Trace &nbsp;<b>[G]</b> 5-Finger Snap &nbsp;<b>[C]</b> Caliper &nbsp;<b>[Space]</b> Lock/Place &nbsp;<b>[B]</b> Calibrate Table &nbsp;<b>[R]</b> Reset
+      <b>Scan Keys:</b> <b>[T]</b> Trace &nbsp;<b>[G]</b> 5-Finger Snap &nbsp;<b>[C]</b> Caliper &nbsp;<b>[Space]</b> Lock/Place &nbsp;<b>[B]</b> Calibrate Table &nbsp;<b>[R]</b> Reset &nbsp;<b>[U]</b> Undo
     </div>
 
     <div class="map-panel" id="map-panel">
@@ -395,6 +395,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'g') act('snapshot');
   else if (k === 'c') act('caliper');
   else if (k === 'b') act('calibrate_table');
+  else if (k === 'u') act('undo').then(showUndoToast);
   else if (k === 'r') act('reset');
   else if (k === ' ' || k === 'p') { e.preventDefault(); act('phase'); }
 });
@@ -523,6 +524,28 @@ function syncSlidersFromTarget() {
   updateSliderLabelsOnly();
 }
 
+function showUndoToast() {
+  let t = document.getElementById('undo-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'undo-toast';
+    t.style.cssText = 'position:fixed;left:14px;bottom:14px;z-index:50;background:#1b2130;color:#e5e7eb;' +
+      'border:1px solid #394256;border-radius:7px;padding:5px 8px;font:11.5px system-ui,sans-serif;' +
+      'display:flex;gap:8px;align-items:center;';
+    const m = document.createElement('span'); m.id = 'undo-toast-msg';
+    const x = document.createElement('span');
+    x.textContent = '✕'; x.title = 'Close';
+    x.style.cssText = 'cursor:pointer;color:#9ca3af;font-weight:700;';
+    x.onclick = () => { t.style.display = 'none'; };
+    t.append(m, x);
+    document.body.appendChild(t);
+  }
+  const ev = (state && state.events) || [];
+  document.getElementById('undo-toast-msg').textContent = (ev[ev.length - 1] || 'Undo').replace(/^\[[^\]]*\]\s*/, '');
+  t.style.display = 'flex';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
 async function act(action, payload={}) {
   const res = await fetch('/api/action', {
     method: 'POST',

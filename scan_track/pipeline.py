@@ -1,6 +1,7 @@
 """Unified stateful pipeline orchestrating stream -> gestures -> 3D hull -> catalog -> relocation -> Unitree G1."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -98,6 +99,8 @@ class ScanTrackSession:
         self._g1_plan: dict[str, Any] | None = None
         self._placed_dirty: bool = False
         self._logged_90_key: str | None = None
+        self._undo_stack: list[dict[str, Any]] = []
+        self._was_streaming: bool = False
         self._event_log: list[str] = ["Session initialized. Ready to scan on flat surface."]
         self._prev_synth_t: float = 0.0
         self._last_processed_seq: int = -1
@@ -146,6 +149,7 @@ class ScanTrackSession:
                 cycle_pos = (raw_frame.timestamp - self.synthetic._t0) % 18.0 if self.synthetic.auto_cycle else 0.0
                 if self.synthetic.auto_cycle and cycle_pos < self._prev_synth_t - 5.0:
                     self._reset_unlocked()
+                    self._undo_stack.clear()
                     self._log(f"Auto-restarted synthetic demo cycle ({self.synthetic.object_key}).")
                 self._prev_synth_t = cycle_pos
             else:
@@ -210,12 +214,50 @@ class ScanTrackSession:
 
             return self._snapshot_unlocked()
 
+    # ------------------------------------------------------------------ undo
+    def _push_undo_unlocked(self) -> None:
+        """Remember the state just before a committed action (points added, object locked/placed)."""
+        self._undo_stack.append(
+            {
+                "cloud": copy.deepcopy(self.cloud),
+                "relocation": copy.deepcopy(self.relocation),
+                "locked_key": self._locked_key,
+                "placed_dirty": self._placed_dirty,
+                "logged_90_key": self._logged_90_key,
+            }
+        )
+        if len(self._undo_stack) > 60:
+            self._undo_stack.pop(0)
+
+    def _undo_unlocked(self) -> str:
+        if not self._undo_stack:
+            self._log("Undo: nothing to undo.")
+            return "Nothing to undo."
+        st = self._undo_stack.pop()
+        self.cloud = st["cloud"]
+        self.relocation = st["relocation"]
+        self._locked_key = st["locked_key"]
+        self._placed_dirty = st["placed_dirty"]
+        self._logged_90_key = st["logged_90_key"]
+        self.gestures.manual_trace_enabled = False
+        self._refresh_scan_and_match_unlocked()
+        if self.relocation.phase == "placed" and self.relocation._current_pose is not None:
+            self._write_placed_outputs_unlocked(self.relocation._current_pose)
+        else:
+            self._object_card = self._mujoco_result = self._g1_plan = None
+        msg = f"Undo: restored previous state ({self.relocation.phase}, {self._last_scan.n_voxels} voxels)."
+        self._log(msg)
+        return msg
+
     def _ingest_tactile_events_unlocked(
         self, right: HandPose, ev: GestureEvent
     ) -> tuple[bool, bool]:
         """Record any active trace, 5-finger snapshot, or caliper width; return (changed, discrete)."""
         changed = False
         discrete = False
+        if (ev.snapshot_5 or ev.caliper_pinch) or (ev.stream_index and not self._was_streaming):
+            self._push_undo_unlocked()   # one undo step per snapshot / caliper / trace stroke
+        self._was_streaming = bool(ev.stream_index)
         if ev.stream_index:
             n_idx = self.cloud.add_points(right.tips_pad["index"])
             changed = changed or (n_idx > 0)
@@ -272,6 +314,7 @@ class ScanTrackSession:
         return xy, h, yaw
 
     def _enter_carrying_unlocked(self, right: HandPose) -> None:
+        self._push_undo_unlocked()
         self.gestures.manual_trace_enabled = False
         self._placed_dirty = False
         self._locked_key = self._last_match.best_key or self._locked_key or next(iter(self.catalog))
@@ -288,6 +331,7 @@ class ScanTrackSession:
         self._log(f"LOCK_GRASP: Locked onto {ref_obj.label} ({conf:.0f}%). Pick up & move freely!")
 
     def _finalize_placement_unlocked(self, right: HandPose) -> None:
+        self._push_undo_unlocked()
         key = self._locked_key or self._last_match.best_key or next(iter(self.catalog))
         ref_obj = self.catalog[key]
         pose_before = self.relocation._initial_pose
@@ -366,7 +410,11 @@ class ScanTrackSession:
         """Handle interactive commands from Web UI buttons or CLI shortcuts."""
         payload = payload or {}
         with self._lock:
-            if action == "reset":
+            if action == "undo":
+                self._undo_unlocked()
+
+            elif action == "reset":
+                self._push_undo_unlocked()
                 self._reset_unlocked()
                 if self.synthetic is not None:
                     self.synthetic.set_object(self.synthetic.object_key)
@@ -381,6 +429,7 @@ class ScanTrackSession:
                         self.cal = WorkspaceCalibration.from_table_points(pts)
                         self.cal.save(self.session_dir / "calibration.json")
                         self._reset_unlocked()
+                        self._undo_stack.clear()
                         self._last_frame_ws = DualHandFrame(
                             timestamp=raw.timestamp,
                             right=self._transform_hand_to_ws(raw.right),
@@ -446,6 +495,7 @@ class ScanTrackSession:
                 if obj_key in self.catalog:
                     self.synthetic.set_object(obj_key)
                     self._reset_unlocked()
+                    self._undo_stack.clear()
                     self._log(f"Switched synthetic target object to: {self.catalog[obj_key].label}.")
 
             elif action == "set_auto_cycle" and self.synthetic is not None:
