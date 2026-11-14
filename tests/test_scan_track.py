@@ -747,12 +747,8 @@ class RelocationAndEndToEndTests(unittest.TestCase):
             self.assertEqual(snap["phase"], "placed")
             self.assertEqual(snap["cloud"]["n_voxels"], v2)
 
-            # Undo placement -> back to carrying (cloud locked)
-            snap = sess.handle_action("undo")
-            self.assertEqual(snap["phase"], "carrying")
-            self.assertTrue(sess.cloud.locked)
-
-            # Undo lock-grasp -> back to scanning (cloud unlocked so scanning can resume!)
+            # Undo placement -> straight back to the pre-pickup state (never the carrying state),
+            # with the cloud unlocked so scanning can resume!
             snap = sess.handle_action("undo")
             self.assertEqual(snap["phase"], "scanning")
             self.assertFalse(sess.cloud.locked)
