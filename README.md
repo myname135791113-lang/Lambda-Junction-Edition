@@ -2,7 +2,7 @@
 
 **Scan an object by touch with Rokoko Smartgloves, recognise it, track it as you move it, and hand a verified pick plan to a Unitree G1 humanoid.**
 
-The gloves have no force sensing, so the system builds a 3D point cloud from fingertip contacts, matches it against a catalog of known objects (which supplies mass, friction and grip limits), and checks the grasp in a MuJoCo twin before it sends anything to the robot.
+The gloves have no force sensing, so the system builds a 3D point cloud from fingertip contacts, matches it against a catalog of known objects, and checks the grasp in a MuJoCo twin before it sends anything to the robot.
 
 ```
 touch scan → 3D point cloud + hull → catalog match → object card → carry & place → MuJoCo check → G1 pick plan
